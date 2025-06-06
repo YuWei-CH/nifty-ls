@@ -1,0 +1,385 @@
+from __future__ import annotations
+
+__all__ = ['lombscargle', 'FFTW_MEASURE', 'FFTW_ESTIMATE']
+
+from timeit import default_timer as timer
+
+import finufft
+import numpy as np
+
+from . import cpu_helpers, chi2_helpers
+
+from itertools import chain
+
+FFTW_MEASURE = 0
+FFTW_ESTIMATE = 64
+
+
+def lombscargle_chi2(
+    t,
+    y,
+    fmin,
+    df,
+    Nf,
+    dy=None,
+    nthreads=None,
+    center_data=True,
+    fit_mean=True,
+    normalization='standard',
+    _no_cpp_helpers=False,
+    verbose=False,
+    finufft_kwargs=None,
+    nterms=1,
+):
+    """
+    Compute the Lomb-Scargle periodogram using the FINUFFT backend.
+
+    Performance Tuning
+    ------------------
+    The performance of this backend depends almost entirely on the performance of finufft,
+    which can vary significantly depending on tuning parameters like the number of threads.
+    Order-of-magnitude speedups or slowdowns are possible. Unfortunately, it's very difficult
+    to predict what will work best for a given problem on a given platform, so some experimentation
+    may be necessary. For nthreads, start with 1 and increase until performance stops improving.
+    Some other tuning parameters are listed under "finufft_kwargs" below.
+
+    See the finufft documentation for the full list of tuning parameters:
+    https://finufft.readthedocs.io/en/latest/opts.html
+
+
+    Parameters
+    ----------
+    t : array-like
+        The time values, shape (N_t,)
+    y : array-like
+        The data values, shape (N_t,) or (N_y, N_t)
+    fmin : float
+        The minimum frequency of the periodogram.
+    df : float
+        The frequency bin width.
+    Nf : int
+        The number of frequency bins.
+    dy : array-like, optional
+        The uncertainties of the data values, broadcastable to `y`
+    nthreads : int, optional
+        The number of threads to use. The default behavior is to use (N_t / 4) * (Nf / 2^15) threads,
+        capped to the maximum number of OpenMP threads. This is a heuristic that may not work well in all cases.
+    center_data : bool, optional
+        Whether to center the data before computing the periodogram. Default is True.
+    fit_mean : bool, optional
+        Whether to fit a mean value to the data before computing the periodogram. Default is True.
+    normalization : str, optional
+        The normalization method to use. One of ['standard', 'model', 'log', 'psd']. Default is 'standard'.
+    _no_cpp_helpers : bool, optional
+        Whether to use the pure Python implementation of the finufft pre- and post-processing.
+        Default is False.
+    verbose : bool, optional
+        Whether to print additional information about the finufft computation.
+    finufft_kwargs : dict, optional
+        Additional keyword arguments to pass to the `finufft.Plan()` constructor.
+        Particular finufft parameters of interest may be:
+        - `eps`: the requested precision [1e-9 for double precision and 1e-5 for single precision]
+        - `upsampfac`: the upsampling factor [1.25]
+        - `fftw`: the FFTW planner flags [FFTW_ESTIMATE]
+    nterms : int, optional
+        Number of Fourier terms in the fit
+    """
+    
+    if nterms == 0 and not fit_mean:
+        raise ValueError("Cannot have nterms = 0 without fitting bias")
+
+    default_finufft_kwargs = dict(
+        eps='default',
+        upsampfac=1.25, # Default upsampling factor
+        fftw=FFTW_ESTIMATE,
+        debug=int(verbose),
+    )
+
+    finufft_kwargs = {**default_finufft_kwargs, **(finufft_kwargs or {})}
+
+    dtype = t.dtype
+
+    if finufft_kwargs['eps'] == 'default':
+        if dtype == np.float32:
+            finufft_kwargs['eps'] = 1e-5
+        else:
+            finufft_kwargs['eps'] = 1e-9
+    if 'backend' in finufft_kwargs:
+        raise ValueError('backend should not be passed as a keyword argument')
+
+    cdtype = np.complex128 if dtype == np.float64 else np.complex64
+
+    if dy is None:
+        dy = dtype.type(1.0)
+    
+    # TODO: Should we add this check?
+    # t, y, dy = np.broadcast_arrays(t, y, dy)
+    # if t.ndim != 1:
+    #     raise ValueError("t, y, dy should be one dimensional")
+    
+    # treat 1D arrays as a batch of size 1
+    squeeze_output = (y.ndim == 1)
+    y = np.atleast_2d(y)
+    dy = np.atleast_2d(dy)
+
+    # If fit_mean, we need to transform (t,yw) and (t,w),
+    # so we stack yw and w into a single array to allow a batched transform.
+    # Regardless, we need to do a separate (t2,w2) transform.
+    Nbatch, N = y.shape
+
+    if nthreads is None:
+        # This heuristic feels fragile, it would be much better if finufft could do this upstream!
+        nthreads = max(1, Nbatch // 4) * max(1, Nf // (1 << 15))
+        # Using get_finufft_max_threads() is safe because finufft never calls omp_set_num_threads()
+        nthreads = min(nthreads, get_finufft_max_threads())
+        # finufft (and cpu_helpers) will warn if the user exceeds omp_get_max_threads()
+
+    if verbose:
+        print(
+            f'[nifty-ls finufft] Using {nthreads} {"thread" if nthreads == 1 else "threads"}'
+        )
+
+    # Could probably be more than finufft nthreads in many cases,
+    # but it's conceptually cleaner to keep them the same, and it
+    # will almost never matter in practice.
+    # Technically, this is also suboptimal in the rare case of a finufft
+    # library without OpenMP and a nifty-ls with OpenMP
+    nthreads_helpers = nthreads
+
+    # Force fit them into 2 arrays to use the batched finufft transform for yw and w
+    yw_w_shape = (2 * Nbatch, N)
+    yw_w = np.empty(yw_w_shape, dtype=cdtype)
+
+    yw = yw_w[:Nbatch]
+    w = yw_w[Nbatch:]
+
+    t_helpers = -timer()
+    if not _no_cpp_helpers: # Use C++ helpers to pre-process the inputs
+        t1 = np.empty_like(t)
+        t2 = np.empty_like(t)
+        w2 = np.empty(y.shape, dtype=cdtype)
+        norm = np.empty(Nbatch, dtype=dtype)
+
+        cpu_helpers.process_finufft_inputs(
+            t1,  # output
+            t2,  # output
+            yw,  # output
+            w,  # output
+            w2,  # output
+            norm,  # output
+            t,  # input
+            y,  # input
+            dy,  # input
+            fmin,
+            df,
+            Nf,
+            center_data,
+            fit_mean,
+            normalization.lower() == 'psd',
+            nthreads_helpers,
+        )
+    else: # Use pure Python implementation
+        t1 = 2 * np.pi * df * t
+        t1 = t1.astype(dtype, copy=False)
+        y = y.astype(dtype, copy=False)
+        dy = dy.astype(dtype, copy=False)
+
+        # w2_base equivalent to w2 in fastfinufft
+        w2_base = (dy ** -2.0).astype(dtype)
+        w2_base = np.broadcast_to(w2_base, (Nbatch, N))
+        w2s = np.sum(w2_base.real, axis=-1)
+        # Creates a 2D array shaped (Nbatch, Nf) for fit mean and centering 
+        w2s_tiled = np.tile(w2s[:, None], (1, N))  # shape (10, N)
+        w2 = w2_base.astype(cdtype, copy=True) # convert to complex dtype
+       
+        if center_data or fit_mean:
+            y = y - (w2.real * y).sum(axis=-1, keepdims=True) / w2s_tiled
+        norm = (w2.real * y**2).sum(axis=-1, keepdims=True)
+
+        Nshift = Nf // 2
+        yw[:] = y * w2.real
+        w[:]  = w2
+
+        ### TODO: Do it later
+        # yw_w = np.vstack([yw, w])
+         
+        # phase_shift_base = np.exp(1j * (Nshift + fmin / df) * t1)  # shape = (N,)
+
+        # # Apply the phase shift to yw_w, may use later
+        # yw_w = yw_w * phase_shift_base[None, :]
+ 
+        # Always start from yw_w (the un-phased weights) each time:
+        def compute_t(time_shift, yw_w):
+            tn = time_shift * t1
+            tn = tn.astype(dtype, copy=False)
+            phase_shiftn = np.exp(1j * (Nshift + fmin / df) * tn)  # shape = (N,)
+
+            # Build a brand-new “batch” of phased weights for this i:
+            yw_w_s = (yw_w * phase_shiftn[None, :]).astype(cdtype)
+            return tn, yw_w_s
+
+    t_helpers += timer()
+
+    t_finufft = -timer()
+    # TODO: Should I move the yws to C++ helpers?
+    yws = (y * w2_base.real).sum(axis=-1)
+    
+    # SCw = [(np.zeros(Nf), ws * np.ones(Nf))]
+    # SCyw = [(np.zeros(Nf), yws * np.ones(Nf))]
+    Sw = [ np.zeros((Nbatch, Nf)) ]
+    Cw = [ np.tile(w2s[:, None], (1, Nf)) ]
+    Syw = [ np.zeros((Nbatch, Nf)) ]
+    Cyw = [ np.tile(yws[:, None], (1, Nf)) ]
+    
+    # for (i -> nterms + 1):
+    #     wyi, ti
+    #     wi, ti
+    # plan_yw(paired)
+    plan_yw = finufft.Plan(
+        nufft_type=1,
+        n_modes_or_dim=(Nf,),
+        n_trans= 2 * Nbatch, # paired processing of y * w and w
+        dtype=cdtype,
+        nthreads=nthreads,
+        **finufft_kwargs,
+    )
+    for i in range(1, nterms + 1):
+        ti, yw_w_j = compute_t(i, yw_w)
+        plan_yw.setpts(ti)
+        f1_fw = plan_yw.execute(yw_w_j)
+        Sw.append(f1_fw[Nbatch:].imag.copy()) # w 
+        Cw.append(f1_fw[Nbatch:].real.copy())
+        Syw.append(f1_fw[:Nbatch].imag.copy()) # yw
+        Cyw.append(f1_fw[:Nbatch].real.copy())
+    
+    # for (nterms + 1 -> 2 * nterms + 1):
+    #     wi, i
+    # plan_w(solo)
+    plan_w = finufft.Plan(
+        nufft_type=1,
+        n_modes_or_dim=(Nf,),
+        n_trans=Nbatch,
+        dtype=cdtype,
+        nthreads=nthreads,
+        **finufft_kwargs,
+    )
+    for i in range(nterms + 1, 2 * nterms + 1):
+        ti, yw_w_i = compute_t(i, yw_w)
+        plan_w.setpts(ti)     
+        f2_all = plan_w.execute(yw_w_i[Nbatch:]) # w only
+        Sw.append(f2_all.imag.copy())
+        Cw.append(f2_all.real.copy())
+    
+    t_finufft += timer()
+
+    t_helpers -= timer()
+    if not _no_cpp_helpers: # post-process the outputs using C++ helpers
+        norm_enum = dict(
+            standard=cpu_helpers.NormKind.Standard,
+            model=cpu_helpers.NormKind.Model,
+            log=cpu_helpers.NormKind.Log,
+            psd=cpu_helpers.NormKind.PSD,
+        )[normalization.lower()]
+
+        power = np.empty(f1.shape, dtype=dtype)
+        cpu_helpers.process_finufft_outputs(
+            power,
+            f1,
+            fw,
+            f2,
+            norm,
+            norm_enum,
+            fit_mean,
+            nthreads_helpers,
+        )
+    else:
+        # build-up matrices at each frequency
+        power = np.zeros((Nbatch, Nf), dtype=dtype)
+        # Build the “order” list once (same for all batches):
+        order = [("C", 0)] if fit_mean else []
+        order.extend(chain(*([("S", i), ("C", i)] for i in range(1, nterms + 1))))
+        
+        def create_funcs(Sw_b, Cw_b, Syw_b, Cyw_b):
+            return {
+            'S': lambda m, i: Syw_b[m][i],
+            'C': lambda m, i: Cyw_b[m][i],
+            'SS': lambda m, n, i: 0.5 * (Cw_b[abs(m - n)][i] - Cw_b[m + n][i]),
+            'CC': lambda m, n, i: 0.5 * (Cw_b[abs(m - n)][i] + Cw_b[m + n][i]),
+            'SC': lambda m, n, i: 0.5 * (np.sign(m - n) * Sw_b[abs(m - n)][i] + Sw_b[m + n][i]),
+            'CS': lambda m, n, i: 0.5 * (np.sign(n - m) * Sw_b[abs(n - m)][i] + Sw_b[n + m][i]),
+            }
+        
+        def compute_power_single(funcs, order, i):
+            # Build XTX and XTy (for this frequency i and this batch):
+            XTX = np.array(
+            [[ funcs[A[0] + B[0]](A[1], B[1], i) for A in order] for B in order]
+            )
+            XTy = np.array([ funcs[A[0]](A[1], i) for A in order])
+            return np.dot(XTy.T, np.linalg.solve(XTX, XTy))
+        
+        # Apply normalization to the power spectrum.
+        def apply_normalization(power, norm, normalization):
+                """
+                Parameters
+                ----------
+                power : ndarray
+                    The power spectrum to normalize
+                norm : ndarray
+                    The normalization factors
+                normalization : str
+                    The normalization method: 'standard', 'model', 'log', or 'psd'
+            
+                Returns
+                -------
+                ndarray
+                    The normalized power spectrum
+                """
+                if normalization == 'standard':
+                    power = power / norm[:, None]
+                elif normalization == 'model':
+                    power = power / (norm[:, None] - power)
+                elif normalization == 'log':
+                    power = -np.log(1 - power / norm[:, None])
+                elif normalization == 'psd':
+                    power = power * 0.5
+                else:
+                    raise ValueError(f'Unknown normalization: {normalization}')
+                return power
+
+        # Batch processing
+        for batch_idx in range(Nbatch):
+            # For this batch, pull out the precomputed arrays:
+            Sw_b  = [ Sw[m][batch_idx]  for m in range(2 * nterms + 1) ]  # list of (Nf,) arrays
+            Cw_b  = [ Cw[m][batch_idx]  for m in range(2 * nterms + 1) ]
+            Syw_b = [ Syw[m][batch_idx] for m in range(nterms + 1) ]
+            Cyw_b = [ Cyw[m][batch_idx] for m in range(nterms + 1) ]
+
+            # Create functions outside the inner loop
+            batch_funcs = create_funcs(Sw_b, Cw_b, Syw_b, Cyw_b)
+
+            # Compute power for all frequencies for this batch:
+            for i in range(Nf):
+                power[batch_idx, i] = compute_power_single(batch_funcs, order, i)
+            
+            # Apply normalization once for all batches
+            power = apply_normalization(power, norm, normalization)
+
+        # If only one batch and squeeze requested, drop batch axis
+        if squeeze_output and Nbatch == 1:
+            power = power[0]
+    
+    t_helpers += timer()
+
+    if verbose:
+        print(
+            f'[nifty-ls finufft] FINUFFT took {t_finufft:.4g} sec, pre-/post-processing took {t_helpers:.4g} sec'
+        )
+
+    return power
+
+
+def get_finufft_max_threads():
+    try:
+        return finufft._finufft.lib.omp_get_max_threads()
+    except AttributeError:
+        return 1
