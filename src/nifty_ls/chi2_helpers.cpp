@@ -12,7 +12,6 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/complex.h>
-#include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 #include <lapacke.h>
 #include <cblas.h>
@@ -22,6 +21,7 @@
 
 #include "cpu_helpers.hpp"
 using cpu_helpers::NormKind;
+using cpu_helpers::TermType;
 
 // Declare a reduction for std::vector<double> using std::transform
 #pragma omp declare reduction(                                                                                                             \
@@ -179,10 +179,10 @@ template <typename Scalar>
 void compute_t(
     nifty_arr_1d<const Scalar> &t1_,
     nifty_arr_2d<const Complex<Scalar>> &yw_w_,
-    int time_shift,
-    Scalar fmin,
-    Scalar df,
-    int Nf,
+    const int time_shift,
+    const Scalar fmin,
+    const Scalar df,
+    const int Nf,
     nifty_arr_1d<Scalar> &tn_out,
     nifty_arr_2d<Complex<Scalar>> &yw_w_s_out)
 {
@@ -206,6 +206,8 @@ void compute_t(
 
     // TODO: Do parallel for here? And can I use OpenMP reduction?
     // do phase shift: phase_shiftn = np.exp(1j * ((Nf // 2) + fmin / df) * tn)
+    // size_t chunk_size = std::max(8, N / nthreads);
+    // #pragma omp parallel for schedule(static, chunk_size)
     for (size_t j = 0; j < N; ++j)
     {
         // complex phase = exp(i * factor * tn[j])
@@ -230,8 +232,7 @@ void process_chi2_outputs(
     nifty_arr_3d<const Scalar> Syw_,
     nifty_arr_3d<const Scalar> Cyw_,
     nifty_arr_2d<const Scalar> norm_,
-    // TODO: Analyze if I need a type for order_types, order_indices
-    const std::vector<std::string> &order_types,
+    const std::vector<TermType> &order_types,
     const std::vector<size_t> &order_indices,
     const NormKind norm_kind,
     int nthreads)
@@ -274,43 +275,39 @@ void process_chi2_outputs(
             // Fill XTy
             for (size_t i = 0; i < order_size; ++i)
             {
-                char t = order_types[i][0]; // 'S' or 'C'
+                TermType t = order_types[i]; // Sine or Cosine
                 size_t m = order_indices[i];
-                XTy[i] = (t == 'S') ? Syw(m, b, f) : Cyw(m, b, f);
+                XTy[i] = (t == TermType::Sine) ? Syw(m, b, f) : Cyw(m, b, f);
             }
 
             // Fill XTX
             for (size_t i = 0; i < order_size; ++i)
             {
-                char ti = order_types[i][0];
+                TermType ti = order_types[i];
                 size_t m = order_indices[i];
                 for (size_t j = 0; j < order_size; ++j)
                 {
-                    char tj = order_types[j][0];
+                    TermType tj = order_types[j];
                     size_t n = order_indices[j];
-                    if (ti == 'S' && tj == 'S')
+
+                    size_t d = (m > n) ? (m - n) : (n - m);
+                    size_t s = m + n;
+
+                    if (ti == TermType::Sine && tj == TermType::Sine)
                     {
-                        size_t d = m > n ? m - n : n - m;
-                        size_t s = m + n;
                         XTX[i][j] = Scalar(0.5) * (Cw(d, b, f) - Cw(s, b, f));
                     }
-                    else if (ti == 'C' && tj == 'C')
+                    else if (ti == TermType::Cosine && tj == TermType::Cosine)
                     {
-                        size_t d = m > n ? m - n : n - m;
-                        size_t s = m + n;
                         XTX[i][j] = Scalar(0.5) * (Cw(d, b, f) + Cw(s, b, f));
                     }
-                    else if (ti == 'S' && tj == 'C')
+                    else if (ti == TermType::Sine && tj == TermType::Cosine)
                     {
-                        size_t d = m > n ? m - n : n - m;
-                        size_t s = m + n;
                         int sign = (m > n ? 1 : (m < n ? -1 : 0));
                         XTX[i][j] = Scalar(0.5) * (sign * Sw(d, b, f) + Sw(s, b, f));
                     }
                     else
-                    { // 'C','S'
-                        size_t d = n > m ? n - m : m - n;
-                        size_t s = n + m;
+                    { // Cosine, Sine
                         int sign = (n > m ? 1 : (n < m ? -1 : 0));
                         XTX[i][j] = Scalar(0.5) * (sign * Sw(d, b, f) + Sw(s, b, f));
                     }
@@ -623,4 +620,8 @@ NB_MODULE(chi2_helpers, m)
           "df"_a,
           "center_data"_a,
           "fit_mean"_a);
+
+    nb::enum_<TermType>(m, "TermType")
+        .value("Sine", TermType::Sine)
+        .value("Cosine", TermType::Cosine);
 }

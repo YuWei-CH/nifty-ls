@@ -251,10 +251,10 @@ def lombscargle_chi2(
         f1_fw = plan_yw.execute(yw_w_j)
         # TODO: use out parameter in finufft.Plan.execute() to 
         # write directly to Sw/Cw/Syw/Cyw arrays and avoid copying
-        Sw[j,:,:] = f1_fw[Nbatch:].imag.copy()  # yw
-        Cw[j,:,:] = f1_fw[Nbatch:].real.copy()
-        Syw[j,:,:] = f1_fw[:Nbatch].imag.copy()
-        Cyw[j,:,:] = f1_fw[:Nbatch].real.copy()
+        Sw[j,:,:] = f1_fw[Nbatch:].imag# yw
+        Cw[j,:,:] = f1_fw[Nbatch:].real
+        Syw[j,:,:] = f1_fw[:Nbatch].imag
+        Cyw[j,:,:] = f1_fw[:Nbatch].real
     
     # Since in fastchi2, the freq_factor of w includes terms 
     # from 1 to 2*nterms, we need one more loop to handle 
@@ -295,7 +295,7 @@ def lombscargle_chi2(
         order = [("C", 0)] if fit_mean else []
         order.extend(chain(*([("S", i), ("C", i)] for i in range(1, nterms + 1))))
         
-        order_types = [item[0] for item in order]
+        order_types = [chi2_helpers.TermType.Cosine if t == "C" else chi2_helpers.TermType.Sine for t, _ in order]
         order_indices = [item[1] for item in order]
         
         chi2_helpers.process_chi2_outputs(

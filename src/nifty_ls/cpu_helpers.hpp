@@ -10,6 +10,12 @@ namespace cpu_helpers
         Log,
         PSD
     };
+
+    enum class TermType
+    {
+        Sine,
+        Cosine
+    };
 }
 
 #endif // CPU_HELPERS_HPP
