@@ -17,12 +17,13 @@ import timeit
 
 import nifty_ls
 import astropy.timeseries.periodograms.lombscargle.implementations.fast_impl as astropy_impl
+import astropy.timeseries.periodograms.lombscargle.implementations.fastchi2_impl as astropychi2_impl
 
 # The Gowanlock+ paper uses N_t=3554 as their single-object dataset.
 DEFAULT_N = 3554
 DEFAULT_NF = None  # 10**5
 DEFAULT_DTYPE = 'f8'
-DEFAULT_METHODS = ['cufinufft', 'finufft', 'astropy', 'finufft_par']
+DEFAULT_METHODS = ['cufinufft', 'finufft', 'astropy', 'finufft_chi2', 'astropy_fastchi2']
 NTHREAD_MAX = len(os.sched_getaffinity(0))
 DEFAULT_FFTW = nifty_ls.finufft.FFTW_MEASURE
 DEFAULT_EPS = 1e-9
@@ -38,6 +39,14 @@ def do_nifty_finufft(*args, **kwargs):
         finufft_kwargs={'fftw': DEFAULT_FFTW, 'eps': DEFAULT_EPS},
     )
 
+def do_nifty_finufft_chi2(*args, nterms=1, **kwargs):
+    return nifty_ls.finufft_chi2.lombscargle(
+        *args,
+        **kwargs,
+        nterms=nterms,
+        finufft_kwargs={'fftw': DEFAULT_FFTW, 'eps': DEFAULT_EPS},
+    )
+
 
 def do_nifty_cufinufft(*args, **kwargs):
     return nifty_ls.cufinufft.lombscargle(
@@ -45,7 +54,7 @@ def do_nifty_cufinufft(*args, **kwargs):
     )
 
 
-def do_astropy(t, y, dy, fmin, df, Nf, **astropy_kwargs):
+def do_astropy_fast(t, y, dy, fmin, df, Nf, **astropy_kwargs):
     f0 = fmin
     y = np.atleast_2d(y)
     dy = np.atleast_2d(dy)
@@ -54,6 +63,17 @@ def do_astropy(t, y, dy, fmin, df, Nf, **astropy_kwargs):
             t, y[i], dy=dy[i], f0=f0, df=df, Nf=Nf, **astropy_kwargs
         )
     return power  # just last power for now
+
+def do_astropy_fastchi2(t, y, dy, fmin, df, Nf, nterms=1, **astropy_kwargs):
+    f0 = fmin
+    y = np.atleast_2d(y)
+    dy = np.atleast_2d(dy)
+    
+    for i in range(y.shape[0]):
+        power = astropychi2_impl.lombscargle_fastchi2(
+            t, y[i], dy=dy[i], f0=f0, df=df, Nf=Nf, nterms=nterms, **astropy_kwargs
+        )
+    return power # just last power for now
 
 
 def do_winding(t, y, dy, fmin, df, Nf, center_data=True, fit_mean=True, **kwargs):
@@ -67,9 +87,13 @@ def do_winding(t, y, dy, fmin, df, Nf, center_data=True, fit_mean=True, **kwargs
 METHODS = {
     'finufft_par': do_nifty_finufft,
     'finufft': lambda *args, **kwargs: do_nifty_finufft(*args, **kwargs, nthreads=1),
+    'finufft_chi2_par': do_nifty_finufft_chi2,
+    'finufft_chi2': lambda *args, **kwargs: do_nifty_finufft_chi2(*args, **kwargs, nthreads=1),
     'cufinufft': do_nifty_cufinufft,
-    'astropy': do_astropy,
-    'astropy_brute': lambda *args, **kwargs: do_astropy(*args, **kwargs, use_fft=False),
+    'astropy': do_astropy_fast,
+    'astropy_brute': lambda *args, **kwargs: do_astropy_fast(*args, **kwargs, use_fft=False),
+    'astropy_fastchi2': do_astropy_fastchi2,
+    'astropy_fastchi2_brute': lambda *args, **kwargs: do_astropy_fastchi2(*args, **kwargs, use_fft=False),
     'winding': do_winding,
 }
 
@@ -153,17 +177,43 @@ def get_plot_kwargs(method, nthread_max=NTHREAD_MAX):
         label = 'nifty-ls (cufinufft)'
         color = 'C2'
         ls = '-'
+    elif method == 'finufft_chi2_par':
+        label = 'nifty-ls (finufft chi2)'
+        color = 'C3'
+        ls = '--'
+    elif method == 'finufft_chi2':
+        label = (
+            'nifty-ls (finufft chi2)' if nthread_max == 1 else 'nifty-ls (finufft chi2, parallel)'
+        )
+        color = 'C3'
+        ls = '-'
     elif method == 'astropy':
         label = r'Astropy (${\tt fast}$ method)'
         color = 'C0'
+        ls = '-'
+    elif method == 'astropy_fastchi2':
+        label = r'Astropy (${\tt fastchi2}$ method)'
+        color = 'C4'
+        ls = '--'
+    elif method == 'astropy_brute':
+        label = r'Astropy (brute force)'
+        color = 'C0'
+        ls = '--'
+    elif method == 'astropy_fastchi2_brute':
+        label = r'Astropy (brute force)'
+        color = 'C4'
         ls = '-'
     elif method == 'astropy_worst':
         label = r'Astropy (worst case)'
         color = 'C0'
         ls = ':'
+    elif method == 'winding':
+        label = 'nifty-ls (winding)'
+        color = 'C5'
+        ls = '-'
     else:
         label = method
-        color = 'C3'
+        color = 'C6'
         ls = '-'
 
     return {'label': label, 'color': color, 'ls': ls}

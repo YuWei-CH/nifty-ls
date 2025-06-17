@@ -35,7 +35,8 @@ def lombscargle(
     assume_sorted_t: bool = True,
     samples_per_peak: int = 5,
     nyquist_factor: int = 5,
-    backend: BACKEND_TYPE = 'finufft',
+    backend: BACKEND_TYPE = 'auto',
+    nterms: int = 1,
     **backend_kwargs: Optional[dict],
 ) -> NiftyResult:
     """
@@ -98,12 +99,40 @@ def lombscargle(
         samples_per_peak=samples_per_peak,
         nyquist_factor=nyquist_factor,
     )
+    # Nterm verification
+    if nterms < 1:
+        raise ValueError(f'nterms must be at least 1, got {nterms}.')
 
+    # Backend selection
+    if backend == 'auto':
+        if nterms > 1:
+            if 'finufft_chi2' in AVAILABLE_BACKENDS:
+                backend = 'finufft_chi2'
+            else:
+                raise ValueError(
+                    'Please install and select the "finufft_chi2" backend when nterms > 1.'
+                )
+        elif 'cufinufft' in AVAILABLE_BACKENDS:
+            backend = 'cufinufft'
+        elif 'finufft' in AVAILABLE_BACKENDS:
+            backend = 'finufft'
+        else:
+            raise ValueError(
+                f'No valid backends available. AVAILABLE_BACKENDS = {AVAILABLE_BACKENDS}'
+            )
     if backend not in AVAILABLE_BACKENDS:
         raise ValueError(
-            f'Unknown or unavailable backend: {backend}. Available backends are: {AVAILABLE_BACKENDS}'
+            f'Unknown or unavailable backend: "{backend}". '
+            f'Available backends: {AVAILABLE_BACKENDS}'
         )
-
+    if backend in ('finufft', 'cufinufft') and nterms > 1:
+        raise ValueError(
+            f'Backend "{backend}" only supports nterms == 1. '
+            'Use "finufft_chi2" for nterms > 1.'
+        )
+    if backend == 'finufft_chi2':
+        backend_kwargs.setdefault('nterms', nterms)
+    
     backend_module = importlib.import_module(f'.{backend}', __package__)
 
     power = backend_module.lombscargle(

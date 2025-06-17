@@ -15,7 +15,7 @@ FFTW_MEASURE = 0
 FFTW_ESTIMATE = 64
 
 
-def lombscargle_chi2(
+def lombscargle(
     t,
     y,
     fmin,
@@ -122,6 +122,14 @@ def lombscargle_chi2(
     # Regardless, we need to do a separate (t2,w2) transform.
     Nbatch, N = y.shape
 
+    # Broadcast dy to match the shape of t and y
+    if dy.ndim == 1:
+        dy_broadcasted = np.broadcast_to(dy, (Nbatch, N))
+    elif dy.shape[1] == 1:
+        dy_broadcasted = np.broadcast_to(dy, (Nbatch, N))
+    else:
+        dy_broadcasted = dy
+
     if nthreads is None:
         # This heuristic feels fragile, it would be much better if finufft could do this upstream!
         nthreads = max(1, Nbatch // 4) * max(1, Nf // (1 << 15))
@@ -175,7 +183,7 @@ def lombscargle_chi2(
             Sw, Cw, Syw, Cyw, # output, use for initial trig matrix
             t,  # input
             y,  # input
-            dy,  # input
+            dy_broadcasted,  # input
             df,
             center_data,
             fit_mean,
@@ -189,8 +197,7 @@ def lombscargle_chi2(
         dy = dy.astype(dtype, copy=False)
 
         # w2_base equivalent to w2 in fastfinufft
-        w2_base = (dy ** -2.0).astype(dtype)
-        w2_base = np.broadcast_to(w2_base, (Nbatch, N))
+        w2_base = (dy_broadcasted ** -2.0).astype(dtype)
         w2s = np.sum(w2_base.real, axis=-1, keepdims=True)  # sum over N
         w2 = w2_base.astype(cdtype, copy=True) # convert to complex dtype
        
