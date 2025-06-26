@@ -79,8 +79,11 @@ def lombscargle(
     nyquist_factor : int, optional
         The factor by which to multiply the Nyquist frequency when determining the frequency grid. Default is 5.
     backend : str, optional
-        The backend to use for the computation. Default is 'finufft'.
-    backend_kwargs : dict, optional
+        The backend to use for the computation. Default is 'auto' which selects the best available backend.
+    nterms : int, optional
+        The number of terms to use in the Lomb-Scargle computation. Must be at least 1.
+        If greater than 1, the 'finufft_chi2' backend should be used.
+    backend_kwargs : dict, optional  
         Additional keyword arguments to pass to the backend.
 
     Returns
@@ -100,6 +103,8 @@ def lombscargle(
         nyquist_factor=nyquist_factor,
     )
     # Nterm verification
+    if nterms is None:
+        nterms = 1
     if nterms < 1:
         raise ValueError(f'nterms must be at least 1, got {nterms}.')
 
@@ -131,6 +136,7 @@ def lombscargle(
             'Use "finufft_chi2" for nterms > 1.'
         )
     if backend == 'finufft_chi2':
+        # Add nterms to backend_kwargs and pass it to the backend
         backend_kwargs.setdefault('nterms', nterms)
     
     backend_module = importlib.import_module(f'.{backend}', __package__)

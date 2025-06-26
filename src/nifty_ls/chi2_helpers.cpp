@@ -52,9 +52,9 @@ void process_chi2_inputs(
     nifty_arr_1d<Scalar> t1_,
     nifty_arr_2d<Complex<Scalar>> yw_,
     nifty_arr_2d<Complex<Scalar>> w_,
-    nifty_arr_1d<Scalar> w2s_,
+    nifty_arr_2d<Scalar> w2s_, // Changed from 1D to 2D to match Python keepdims=True
     nifty_arr_2d<Scalar> norm_,
-    nifty_arr_1d<Scalar> yws_,
+    nifty_arr_2d<Scalar> yws_, // Changed from 1D to 2D to match Python keepdims=True
     nifty_arr_3d<Scalar> Sw_,
     nifty_arr_3d<Scalar> Cw_,
     nifty_arr_3d<Scalar> Syw_,
@@ -102,9 +102,9 @@ void process_chi2_inputs(
     (void)nthreads; // suppress unused variable warning
 #endif
 
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) num_threads(nthreads)
-#endif
+    // #ifdef _OPENMP
+    // #pragma omp parallel for schedule(static) num_threads(nthreads)
+    // #endif
     // Compute t1
     for (size_t j = 0; j < N; ++j)
     {
@@ -131,8 +131,8 @@ void process_chi2_inputs(
             yoff += wt * y(i, j);
         }
 
-        // Store sum of weights
-        w2s(i) = sum_w;
+        // Store sum of weights with keepdims=True shape (Nbatch, 1)
+        w2s(i, 0) = sum_w;
 
         if (center_data || fit_mean)
         {
@@ -161,16 +161,23 @@ void process_chi2_inputs(
         }
         // norm = (w2.real * y**2).sum(axis=-1, keepdims=True)
         norm(i, 0) = sum_norm;
-        // yws = (y * w2.real).sum(axis=-1)
-        yws(i) = sum_yw2;
+        // yws = (y * w2.real).sum(axis=-1, keepdims=True)
+        if (center_data || fit_mean)
+        {
+            yws(i, 0) = Scalar(0); // Mathematically, fit_mean or center_data will set yws to 0
+        }
+        else
+        {
+            yws(i, 0) = sum_yw2; // Use the sum of weighted y directly
+        }
 
-        // Fill trig matrix
+        // Initialize trig matrix
         for (size_t f = 0; f < Nf; ++f)
         {
             Sw(0, i, f) = Scalar(0);
             Syw(0, i, f) = Scalar(0);
-            Cw(0, i, f) = w2s(i);
-            Cyw(0, i, f) = yws(i);
+            Cw(0, i, f) = w2s(i, 0); // Use 2D indexing to match Python keepdims=True
+            Cyw(0, i, f) = yws(i, 0);
         }
     }
 }
@@ -276,7 +283,7 @@ void process_chi2_outputs(
             for (size_t i = 0; i < order_size; ++i)
             {
                 TermType t = order_types[i]; // Sine or Cosine
-                size_t m = order_indices[i];
+                size_t m = order_indices[i]; // Nterms
                 XTy[i] = (t == TermType::Sine) ? Syw(m, b, f) : Cyw(m, b, f);
             }
 
@@ -314,7 +321,7 @@ void process_chi2_outputs(
                 }
             }
 
-            // 2) Solve XTX * beta = XTy using Cholesky
+            // 2) Solve XTX * beta = XTy using genral LU decomposition
             // Flatten into column-major for LAPACK
             std::vector<Scalar> A(order_size * order_size);
             for (size_t i = 0; i < order_size; ++i)
@@ -322,20 +329,23 @@ void process_chi2_outputs(
                     A[j * order_size + i] = XTX[i][j];
             std::vector<Scalar> bvec = XTy;
             int n = int(order_size), nrhs = 1, info;
+            std::vector<lapack_int> ipiv(n);
             if constexpr (std::is_same_v<Scalar, double>)
             {
-                info = LAPACKE_dposv(LAPACK_COL_MAJOR, 'U', n, nrhs,
+                info = LAPACKE_dgesv(LAPACK_COL_MAJOR, n, nrhs,
                                      A.data(), n,
+                                     ipiv.data(),
                                      bvec.data(), n);
             }
             else
             {
-                info = LAPACKE_sposv(LAPACK_COL_MAJOR, 'U', n, nrhs,
+                info = LAPACKE_sgesv(LAPACK_COL_MAJOR, n, nrhs,
                                      A.data(), n,
+                                     ipiv.data(),
                                      bvec.data(), n);
             }
             if (info != 0)
-                throw std::runtime_error("Cholesky solve failed");
+                throw std::runtime_error("LU solve failed (LAPACKE_dgesv/sgesv returned non-zero)");
 
             // 3) Compute dot(XTy, beta)
             Scalar pw;
@@ -368,22 +378,6 @@ void process_chi2_outputs(
             }
         }
     }
-}
-
-template <typename Scalar>
-Scalar _normalization(nifty_arr_1d<const Scalar> y_, std::vector<Scalar> &w, Scalar wsum, Scalar yoff)
-{
-    // only used for winding
-
-    const auto y = y_.view(); // read-only
-
-    Scalar invnorm = Scalar(0);
-    const size_t N = y.shape(0);
-    for (size_t n = 0; n < N; ++n)
-    {
-        invnorm += (w[n] / wsum) * (y(n) - yoff) * (y(n) - yoff);
-    }
-    return Scalar(1) / invnorm;
 }
 
 NB_MODULE(chi2_helpers, m)
@@ -438,7 +432,7 @@ NB_MODULE(chi2_helpers, m)
           "tn_out"_a.noconvert(),
           "yw_w_s_out"_a.noconvert());
 
-    m.def("compute_t", &compute_t<double>,
+    m.def("compute_t", &compute_t<float>,
           "t1"_a.noconvert(),
           "yw_w"_a.noconvert(),
           "time_shift"_a,
@@ -471,16 +465,6 @@ NB_MODULE(chi2_helpers, m)
           "order_indices"_a,
           "norm_kind"_a,
           "nthreads"_a);
-
-    m.def("compute_winding", &compute_winding<double>,
-          "power"_a.noconvert(),
-          "t"_a.noconvert(),
-          "y"_a.noconvert(),
-          "w"_a.noconvert(),
-          "fmin"_a,
-          "df"_a,
-          "center_data"_a,
-          "fit_mean"_a);
 
     nb::enum_<TermType>(m, "TermType")
         .value("Sine", TermType::Sine)

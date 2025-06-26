@@ -91,7 +91,7 @@ def lombscargle(
     default_finufft_kwargs = dict(
         eps='default',
         upsampfac=1.25, # Default upsampling factor
-        fftw=FFTW_ESTIMATE,
+        fftw=FFTW_ESTIMATE, # FFTW_ESTIMATE
         debug=int(verbose),
     )
 
@@ -160,23 +160,23 @@ def lombscargle(
     # 2*nterms + 1 terms for w, nterms + 1 terms for yw. Fetching the Plan
     nSW = 2*nterms + 1
     nSY = nterms + 1
-    Sw  = np.empty((nSW, Nbatch, Nf), dtype=dtype) # Shape(nSW, Nbatch, Nf)
-    Cw  = np.empty((nSW, Nbatch, Nf), dtype=dtype)
-    Syw = np.empty((nSY, Nbatch, Nf), dtype=dtype)
-    Cyw = np.empty((nSY, Nbatch, Nf), dtype=dtype)
+    Sw  = np.zeros((nSW, Nbatch, Nf), dtype=dtype) # Shape(nSW, Nbatch, Nf) and Initlize to 0
+    Cw  = np.zeros((nSW, Nbatch, Nf), dtype=dtype)
+    Syw = np.zeros((nSY, Nbatch, Nf), dtype=dtype)
+    Cyw = np.zeros((nSY, Nbatch, Nf), dtype=dtype)
 
     t_helpers = -timer()
     if not _no_cpp_helpers: # Use C++ helpers
         t1 = np.empty_like(t)
-        w2s = np.empty(Nbatch, dtype=dtype)
+        w2s = np.empty((Nbatch, 1), dtype=dtype)  # Changed to 2D to match keepdims=True
         
         norm = np.empty((Nbatch, 1), dtype=dtype)
-        yws = np.empty(Nbatch, dtype=dtype)
+        yws = np.empty((Nbatch, 1), dtype=dtype)  # Changed to 2D to match keepdims=True
         
         chi2_helpers.process_chi2_inputs(
             t1,  # output
             yw,  # output
-            w,  # output
+            w,  # output, refer to yw_w[Nbatch:]
             w2s,  # output
             norm,  # output
             yws, # output
@@ -189,35 +189,35 @@ def lombscargle(
             fit_mean,
             nthreads_helpers,
         )
-        
+
     else:
         t1 = 2 * np.pi * df * t
         t1 = t1.astype(dtype, copy=False)
         y = y.astype(dtype, copy=False)
         dy = dy.astype(dtype, copy=False)
 
-        # w2_base equivalent to w2 in fastfinufft
-        w2_base = (dy_broadcasted ** -2.0).astype(dtype)
-        w2s = np.sum(w2_base.real, axis=-1, keepdims=True)  # sum over N
-        w2 = w2_base.astype(cdtype, copy=True) # convert to complex dtype
+        # w_base equivalent to w2 in fastfinufft
+        w_base = (dy_broadcasted ** -2.0).astype(dtype)
+        w2s = np.sum(w_base.real, axis=-1, keepdims=True)  # sum over N, shape: (Nbatch, 1)
        
         if center_data or fit_mean:
-            y = y - ((w2.real * y).sum(axis=-1, keepdims=True) / w2s)
-        # np.dot(yw, yw)
-        norm = (w2.real * y**2).sum(axis=-1, keepdims=True)
+            y = y - ((w_base * y).sum(axis=-1, keepdims=True) / w2s)
+            yws = np.zeros((Nbatch, 1), dtype=dtype)  # shape: (Nbatch, 1)
+        else:
+            yws = (y * w_base).sum(axis=-1, keepdims=True)  # shape: (Nbatch, 1) to match w2s
 
-        yw[:] = y * w2.real
-        w[:]  = w2
-        
-        yws = (y * w2.real).sum(axis=-1)
+        norm = (w_base * y**2).sum(axis=-1, keepdims=True)
+
+        yw[:] = y * w_base
+        w[:]  = w_base
         
         # SCw = [(np.zeros(Nf), ws * np.ones(Nf))]
         # SCyw = [(np.zeros(Nf), yws * np.ones(Nf))]
         Sw[0,:,:] = 0
-        Cw[0,:,:] = w2s  # broadcasting your w2s over Nf
+        Cw[0,:,:] = w2s  # broadcasting w2s from (Nbatch, 1) to (Nbatch, Nf)
         Syw[0,:,:] = 0
-        Cyw[0,:,:] = yws[:,None]
-        
+        Cyw[0,:,:] = yws  # broadcasting yws from (Nbatch, 1) to (Nbatch, Nf)
+
     # This function applies a time shift to the reference time t1 and computes
     # the corresponding phase shifts. It then creates a new batch of weights
     # by multiplying the input weights with the phase shifts.
@@ -227,7 +227,7 @@ def lombscargle(
         phase_shiftn = np.exp(1j * ((Nf // 2) + fmin / df) * tn)  # shape = (N,)
 
         # Build a brand-new "batch" of phased weights for this i:
-        yw_w_s = (yw_w * phase_shiftn[None, :]).astype(cdtype)
+        yw_w_s = (yw_w * phase_shiftn).astype(cdtype) # broadcasting explicit
         return tn, yw_w_s
     t_helpers += timer()
 
@@ -262,7 +262,7 @@ def lombscargle(
         Cw[j,:,:] = f1_fw[Nbatch:].real
         Syw[j,:,:] = f1_fw[:Nbatch].imag
         Cyw[j,:,:] = f1_fw[:Nbatch].real
-    
+
     # Since in fastchi2, the freq_factor of w includes terms 
     # from 1 to 2*nterms, we need one more loop to handle 
     # the result of the transform for indices nterms + 1 to 2*nterms(inclusive).
@@ -283,12 +283,14 @@ def lombscargle(
             ti, yw_w_i = compute_t(i, yw_w)
         plan_w.setpts(ti)     
         f2_all = plan_w.execute(yw_w_i[Nbatch:]) # w only
-        Sw[i,:,:] = f2_all.imag.copy()
-        Cw[i,:,:] = f2_all.real.copy()
-
+        Sw[i,:,:] = f2_all.imag
+        Cw[i,:,:] = f2_all.real
     t_finufft += timer()
 
     t_helpers -= timer()
+    # Build the "order" list once (same for all batches):
+    order = [("C", 0)] if fit_mean else []
+    order.extend(chain(*([("S", i), ("C", i)] for i in range(1, nterms + 1))))
     if not _no_cpp_helpers: # Using C++ helpers
         norm_enum = dict(
             standard=cpu_helpers.NormKind.Standard,
@@ -298,9 +300,6 @@ def lombscargle(
         )[normalization.lower()]
 
         power = np.zeros((Nbatch, Nf), dtype=dtype)
-        # Build the "order" list once (same for all batches):
-        order = [("C", 0)] if fit_mean else []
-        order.extend(chain(*([("S", i), ("C", i)] for i in range(1, nterms + 1))))
         
         order_types = [chi2_helpers.TermType.Cosine if t == "C" else chi2_helpers.TermType.Sine for t, _ in order]
         order_indices = [item[1] for item in order]
@@ -314,14 +313,10 @@ def lombscargle(
             norm_enum,
             nthreads_helpers,
         )
-        
+
     else:
         # Build-up matrices at each frequency
         power = np.zeros((Nbatch, Nf), dtype=dtype)
-        
-        # Prepare the "order" list as a template (reuse for all batches)
-        order = [("C", 0)] if fit_mean else []
-        order.extend(chain(*([("S", i), ("C", i)] for i in range(1, nterms + 1))))
         
         # Returns a dictionary of lambda functions that provide access to precomputed 
         # sine and cosine basis terms and their weighted versions.
@@ -335,13 +330,26 @@ def lombscargle(
             'CS': lambda m, n, i: 0.5 * (np.sign(n - m) * Sw_b[abs(n - m)][i] + Sw_b[n + m][i]),
             }
         
-        def compute_power_single(funcs, order, i):
+        def compute_power_single(funcs, order, i, norm_value, normalization):
             # Build XTX and XTy for the current frequency i
             XTX = np.array(
             [[ funcs[A[0] + B[0]](A[1], B[1], i) for A in order] for B in order]
             )
             XTy = np.array([ funcs[A[0]](A[1], i) for A in order])
-            return np.dot(XTy.T, np.linalg.solve(XTX, XTy))
+            
+            raw_power = np.dot(XTy.T, np.linalg.solve(XTX, XTy))
+            
+            # Apply normalization per batch
+            if normalization == 'standard':
+                return raw_power / norm_value
+            elif normalization == 'model':
+                return raw_power / (norm_value - raw_power)
+            elif normalization == 'log':
+                return -np.log(1 - raw_power / norm_value)
+            elif normalization == 'psd':
+                return raw_power * 0.5
+            else:
+                raise ValueError(f'Unknown normalization: {normalization}')
 
         # Batch processing
         for batch_idx in range(Nbatch):
@@ -354,21 +362,12 @@ def lombscargle(
             # Create functions outside the inner loop
             batch_funcs = create_funcs(Sw_b, Cw_b, Syw_b, Cyw_b)
 
-            # Compute power for all frequencies for this batch:
-            for i in range(Nf):
-                power[batch_idx, i] = compute_power_single(batch_funcs, order, i)
+            # Get the normalization value for this batch
+            norm_value = norm[batch_idx, 0]
             
-        # Apply normalization once for all batches
-        if normalization == 'standard':
-            power = power / norm
-        elif normalization == 'model':
-            power = power / (norm - power)
-        elif normalization == 'log':
-            power = -np.log(1 - power / norm)
-        elif normalization == 'psd':
-            power = power * 0.5
-        else:
-            raise ValueError(f'Unknown normalization: {normalization}')
+            # Compute power and normalization for all frequencies for this batch:
+            for i in range(Nf):
+                power[batch_idx, i] = compute_power_single(batch_funcs, order, i, norm_value, normalization)     
 
     # If only one batch and squeeze requested, drop batch axis
     if squeeze_output:

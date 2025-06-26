@@ -6,6 +6,8 @@ import matplotlib
 matplotlib.use('Agg')
 
 import nifty_ls.finufft
+import nifty_ls.finufft_chi2
+from astropy.timeseries.periodograms import LombScargle
 
 from astropy.io import ascii
 from astropy.table import Table
@@ -17,7 +19,8 @@ import timeit
 
 import nifty_ls
 import astropy.timeseries.periodograms.lombscargle.implementations.fast_impl as astropy_impl
-import astropy.timeseries.periodograms.lombscargle.implementations.fastchi2_impl as astropychi2_impl
+import astropy.timeseries.periodograms.lombscargle.implementations.fastchi2_impl as astropyfastchi2_impl
+import astropy.timeseries.periodograms.lombscargle.implementations.chi2_impl as astropychi2_impl
 
 # The Gowanlock+ paper uses N_t=3554 as their single-object dataset.
 DEFAULT_N = 3554
@@ -39,7 +42,7 @@ def do_nifty_finufft(*args, **kwargs):
         finufft_kwargs={'fftw': DEFAULT_FFTW, 'eps': DEFAULT_EPS},
     )
 
-def do_nifty_finufft_chi2(*args, nterms=1, **kwargs):
+def do_nifty_finufft_chi2(*args, nterms=2, **kwargs):
     return nifty_ls.finufft_chi2.lombscargle(
         *args,
         **kwargs,
@@ -64,14 +67,27 @@ def do_astropy_fast(t, y, dy, fmin, df, Nf, **astropy_kwargs):
         )
     return power  # just last power for now
 
-def do_astropy_fastchi2(t, y, dy, fmin, df, Nf, nterms=1, **astropy_kwargs):
+def do_astropy_fastchi2(t, y, dy, fmin, df, Nf, nterms=2, **astropy_kwargs):
     f0 = fmin
     y = np.atleast_2d(y)
     dy = np.atleast_2d(dy)
     
     for i in range(y.shape[0]):
-        power = astropychi2_impl.lombscargle_fastchi2(
-            t, y[i], dy=dy[i], f0=f0, df=df, Nf=Nf, nterms=nterms, **astropy_kwargs
+        power = astropyfastchi2_impl.lombscargle_fastchi2(
+            t, y[i], dy=dy[i], f0=f0, df=df, Nf=Nf, fit_mean=True, center_data=True, nterms=nterms, **astropy_kwargs
+        )
+    return power # just last power for now
+
+def do_astropy_chi2(t, y, dy, fmin, df, Nf, nterms=2, **astropy_kwargs):
+    y = np.atleast_2d(y)
+    dy = np.atleast_2d(dy)
+    
+    
+    frequency = fmin + df * np.arange(Nf)
+    
+    for i in range(y.shape[0]):
+        power = astropychi2_impl.lombscargle_chi2(
+            t, y[i], dy=dy[i], fit_mean=True, center_data=True, frequency=frequency, nterms=nterms, **astropy_kwargs
         )
     return power # just last power for now
 
@@ -93,6 +109,7 @@ METHODS = {
     'astropy': do_astropy_fast,
     'astropy_brute': lambda *args, **kwargs: do_astropy_fast(*args, **kwargs, use_fft=False),
     'astropy_fastchi2': do_astropy_fastchi2,
+    'astropy_chi2': do_astropy_chi2,
     'astropy_fastchi2_brute': lambda *args, **kwargs: do_astropy_fastchi2(*args, **kwargs, use_fft=False),
     'winding': do_winding,
 }
@@ -117,6 +134,7 @@ def run_one(
     t = np.sort(rng.uniform(0, 2 * np.pi, N).astype(dtype)) * 1000
     y = np.sin(t * rng.uniform(0.1, 10, batch_size).reshape(-1, 1)).astype(dtype)
     dy = rng.normal(size=(batch_size, N)).astype(dtype)
+    # dy = np.ones((batch_size, N), dtype=dtype)
 
     if squeeze and batch_size == 1:
         y = y[0]
