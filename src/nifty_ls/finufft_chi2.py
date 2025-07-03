@@ -7,6 +7,8 @@ from timeit import default_timer as timer
 import finufft
 import numpy as np
 
+import threadpoolctl
+
 from . import cpu_helpers, chi2_helpers
 
 from itertools import chain
@@ -22,7 +24,9 @@ def lombscargle(
     df,
     Nf,
     dy=None,
-    nthreads=None,
+    nthreads=16,
+    nthreads_finufft=16,
+    nthreads_blas=1,
     center_data=True,
     fit_mean=True,
     normalization='standard',
@@ -46,6 +50,17 @@ def lombscargle(
     See the finufft documentation for the full list of tuning parameters:
     https://finufft.readthedocs.io/en/latest/opts.html
 
+    Threading Model
+    ---------------
+    This function uses a three-level threading approach:
+    1. nthreads: Batch-level parallelization (cannot exceed Nbatch)
+    2. nthreads_finufft: FINUFFT computation threads (can exceed Nbatch for large frequency grids)  
+    3. nthreads_blas: BLAS/LAPACK threads for linear algebra, applied only during matrix operations
+       (automatically reduced for small matrices)
+
+    BLAS threading is controlled via threadpoolctl context managers applied only around 
+    the specific np.dot/np.linalg.solve operations, ensuring FINUFFT can use its own 
+    threading settings independently.
 
     Parameters
     ----------
@@ -61,9 +76,19 @@ def lombscargle(
         The number of frequency bins.
     dy : array-like, optional
         The uncertainties of the data values, broadcastable to `y`
-    nthreads : int, optional
-        The number of threads to use. The default behavior is to use (N_t / 4) * (Nf / 2^15) threads,
-        capped to the maximum number of OpenMP threads. This is a heuristic that may not work well in all cases.
+    nthreads_batch : int, optional
+        The number of threads to use for batch-level parallelization in pre/post-processing. 
+        Default is min(Nbatch, nthreads_finufft). Setting nthreads > Nbatch wastes resources
+        since you cannot parallelize more batches than available.
+        If None, it will be set to 1 for. Only used if `_no_cpp_helpers` is False.
+    nthreads_finufft : int, optional
+        The number of threads to use for FINUFFT computation. Default is computed from problem 
+        size using: max(1, Nbatch//4) * max(1, Nf//32768), capped by system limits. FINUFFT 
+        can benefit from multiple threads even on single batches for large frequency grids.
+    nthreads_blas : int, optional
+        The number of threads to use for BLAS/LAPACK linear algebra operations. Default is 
+        nthreads_finufft // nthreads. Use -1 to disable threadpoolctl and use system default 
+        BLAS threading. For small matrices (nterms ≤ 2), automatically uses 1 thread for efficiency.
     center_data : bool, optional
         Whether to center the data before computing the periodogram. Default is True.
     fit_mean : bool, optional
@@ -130,16 +155,45 @@ def lombscargle(
     else:
         dy_broadcasted = dy
 
-    if nthreads is None:
-        # This heuristic feels fragile, it would be much better if finufft could do this upstream!
-        nthreads = max(1, Nbatch // 4) * max(1, Nf // (1 << 15))
-        # Using get_finufft_max_threads() is safe because finufft never calls omp_set_num_threads()
-        nthreads = min(nthreads, get_finufft_max_threads())
-        # finufft (and cpu_helpers) will warn if the user exceeds omp_get_max_threads()
+    # Multithreading heuristics
+    # nthreads * nthreads_blas = omp_max_threads()
+    if nthreads_finufft is None:
+        # Compute optimal FINUFFT threads based on problem size
+        nthreads_finufft = max(1, Nbatch // 4) * max(1, Nf // (1 << 15))
+        # Allocate threads more than system limits may bring performance down
+        nthreads_finufft = min(nthreads_finufft, get_finufft_max_threads())
+    
+    if not _no_cpp_helpers:
+        if nthreads is None:
+            # Scale batch-level threads based on frequency grid size and batch count
+            # For small Nf, reduce threading even with multiple batches
+            nf_factor = max(1, Nf // (1 << 15))  # Reduce threads for small frequency grids
+            # nthreads = min(Nbatch, nthreads_finufft, nf_factor)
+            nthreads = get_finufft_max_threads()
 
+        if nthreads_blas is None:
+            # Default to 1 thread for BLAS, since the matrices size are n * n where n is nterms + 1. 
+            # This size is very small, so using multiple threads is not efficient. 
+            nthreads_blas = 1
+        
+        # If nthreads_blas is -1, we disable threadpoolctl and use system defaults. If not, cap 
+        # the threads for BLAS, which is used for linear algebra operations in C++.
+        if nthreads_blas != -1:
+            controller = threadpoolctl.threadpool_limits(limits=nthreads_blas, user_api='blas')
+            controller.__enter__()
+    
     if verbose:
+        if not _no_cpp_helpers:
+            if nthreads_blas == -1:
+                blas_msg = "default BLAS threading"
+            else:
+                blas_msg = f"{nthreads_blas} BLAS {'thread' if nthreads_blas == 1 else 'threads'}"
+            nthreads_msg = f"{nthreads} {'thread' if nthreads == 1 else 'threads'} for batch"
+        else:
+            blas_msg = "default BLAS threading"
+            nthreads_msg = f"single thread for batch"
         print(
-            f'[nifty-ls finufft] Using {nthreads} {"thread" if nthreads == 1 else "threads"}'
+            f'[nifty-ls finufft] Using {nthreads_msg}, {nthreads_finufft} for FINUFFT, {blas_msg}'
         )
 
     # Could probably be more than finufft nthreads in many cases,
@@ -244,14 +298,14 @@ def lombscargle(
         n_modes_or_dim=(Nf,),
         n_trans= 2 * Nbatch, # paired processing of y * w and w
         dtype=cdtype,
-        nthreads=nthreads,
+        nthreads=nthreads_finufft,
         **finufft_kwargs,
     )
     for j in range(1, nterms + 1):
-        if not _no_cpp_helpers:
+        if not _no_cpp_helpers: # Using C++ helpers
             tj = np.empty_like(t1)
             yw_w_j = np.empty_like(yw_w)
-            chi2_helpers.compute_t(t1, yw_w, j, fmin, df, Nf, tj, yw_w_j)
+            chi2_helpers.compute_t(t1, yw_w, j, fmin, df, Nf, tj, yw_w_j, nthreads_helpers)
         else:
             tj, yw_w_j = compute_t(j, yw_w)
         plan_yw.setpts(tj)
@@ -271,14 +325,14 @@ def lombscargle(
         n_modes_or_dim=(Nf,),
         n_trans=Nbatch,
         dtype=cdtype,
-        nthreads=nthreads,
+        nthreads=nthreads_finufft,
         **finufft_kwargs,
     )
     for i in range(nterms + 1, 2 * nterms + 1):
         if not _no_cpp_helpers:
             ti = np.empty_like(t1)
             yw_w_i = np.empty_like(yw_w)
-            chi2_helpers.compute_t(t1, yw_w, i, fmin, df, Nf, ti, yw_w_i)
+            chi2_helpers.compute_t(t1, yw_w, i, fmin, df, Nf, ti, yw_w_i, nthreads_helpers)
         else:
             ti, yw_w_i = compute_t(i, yw_w)
         plan_w.setpts(ti)     
@@ -351,23 +405,32 @@ def lombscargle(
             else:
                 raise ValueError(f'Unknown normalization: {normalization}')
 
-        # Batch processing
-        for batch_idx in range(Nbatch):
+        # Parallel batch processing using ThreadPoolExecutor
+        def process_batch(batch_idx):
+            
+            # # Limit BLAS threads for this batch
+            # with threadpoolctl.threadpool_limits(limits=nthreads_blas, user_api='blas'):
             # For this batch, pull out the precomputed arrays:
             Sw_b  = [ Sw[m][batch_idx]  for m in range(2 * nterms + 1) ]  # list of (Nf,) arrays
             Cw_b  = [ Cw[m][batch_idx]  for m in range(2 * nterms + 1) ]
             Syw_b = [ Syw[m][batch_idx] for m in range(nterms + 1) ]
             Cyw_b = [ Cyw[m][batch_idx] for m in range(nterms + 1) ]
-
-            # Create functions outside the inner loop
+            # Create functions for this batch
             batch_funcs = create_funcs(Sw_b, Cw_b, Syw_b, Cyw_b)
 
             # Get the normalization value for this batch
             norm_value = norm[batch_idx, 0]
             
             # Compute power and normalization for all frequencies for this batch:
+            batch_power = np.zeros(Nf, dtype=dtype)
             for i in range(Nf):
-                power[batch_idx, i] = compute_power_single(batch_funcs, order, i, norm_value, normalization)     
+                batch_power[i] = compute_power_single(batch_funcs, order, i, norm_value, normalization)
+            return batch_idx, batch_power
+        
+        for batch_idx in range(Nbatch):
+            # Collect results back into the power array
+            _, batch_power = process_batch(batch_idx)
+            power[batch_idx] = batch_power
 
     # If only one batch and squeeze requested, drop batch axis
     if squeeze_output:
@@ -379,6 +442,11 @@ def lombscargle(
         print(
             f'[nifty-ls finufft] FINUFFT took {t_finufft:.4g} sec, pre-/post-processing took {t_helpers:.4g} sec'
         )
+
+    # # Clean up threadpoolctl context manager if used
+
+    if not _no_cpp_helpers and nthreads_blas != -1:
+        controller.__exit__(None, None, None)
 
     return power
 
