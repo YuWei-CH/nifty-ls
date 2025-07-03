@@ -134,7 +134,6 @@ def run_one(
     t = np.sort(rng.uniform(0, 2 * np.pi, N).astype(dtype)) * 1000
     y = np.sin(t * rng.uniform(0.1, 10, batch_size).reshape(-1, 1)).astype(dtype)
     dy = rng.normal(size=(batch_size, N)).astype(dtype)
-    # dy = np.ones((batch_size, N), dtype=dtype)
 
     if squeeze and batch_size == 1:
         y = y[0]
@@ -196,29 +195,33 @@ def get_plot_kwargs(method, nthread_max=NTHREAD_MAX):
         color = 'C2'
         ls = '-'
     elif method == 'finufft_chi2_par':
-        label = 'nifty-ls (finufft chi2)'
-        color = 'C3'
-        ls = '--'
-    elif method == 'finufft_chi2':
         label = (
             'nifty-ls (finufft chi2)' if nthread_max == 1 else 'nifty-ls (finufft chi2, parallel)'
         )
+        color = 'C3'
+        ls = '--'
+    elif method == 'finufft_chi2':
+        label = 'nifty-ls (finufft chi2)'
         color = 'C3'
         ls = '-'
     elif method == 'astropy':
         label = r'Astropy (${\tt fast}$ method)'
         color = 'C0'
         ls = '-'
-    elif method == 'astropy_fastchi2':
-        label = r'Astropy (${\tt fastchi2}$ method)'
-        color = 'C4'
-        ls = '--'
     elif method == 'astropy_brute':
         label = r'Astropy (brute force)'
         color = 'C0'
         ls = '--'
+    elif method == 'astropy_fastchi2':
+        label = r'Astropy (${\tt fastchi2}$ method)'
+        color = 'C4'
+        ls = '--'
+    elif method == 'astropy_chi2':
+        label = r'Astropy (${\tt chi2}$ method)'
+        color = 'C4'
+        ls = '-.'
     elif method == 'astropy_fastchi2_brute':
-        label = r'Astropy (brute force)'
+        label = r'Astropy (${\tt fastchi2}$ brute force)'
         color = 'C4'
         ls = '-'
     elif method == 'astropy_worst':

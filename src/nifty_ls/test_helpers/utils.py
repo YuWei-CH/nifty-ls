@@ -17,7 +17,7 @@ def gen_data(N=100, Nbatch=None, seed=5043, dtype=np.float64):
     y += rng.normal(0, dy, y.shape)
 
     fmin, df, Nf = validate_frequency_grid(None, None, None, t)
-    fmin = 0.01 # For test purpose
+    fmin = 2 * df # For test purpose
     fmax = fmin + df * (Nf - 1)
 
     t.setflags(write=False)
