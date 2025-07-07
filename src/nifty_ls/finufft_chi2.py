@@ -24,9 +24,9 @@ def lombscargle(
     df,
     Nf,
     dy=None,
-    nthreads=16,
-    nthreads_finufft=16,
-    nthreads_blas=1,
+    nthreads=None,
+    nthreads_finufft=None,
+    nthreads_blas=None,
     center_data=True,
     fit_mean=True,
     normalization='standard',
@@ -165,9 +165,10 @@ def lombscargle(
     
     if not _no_cpp_helpers:
         if nthreads is None:
+            #TODO: Remove it, and now we didn't pass it to the function
             # Scale batch-level threads based on frequency grid size and batch count
             # For small Nf, reduce threading even with multiple batches
-            nf_factor = max(1, Nf // (1 << 15))  # Reduce threads for small frequency grids
+            # nf_factor = max(1, Nf // (1 << 15))  # Reduce threads for small frequency grids
             # nthreads = min(Nbatch, nthreads_finufft, nf_factor)
             nthreads = get_finufft_max_threads()
 
@@ -214,10 +215,10 @@ def lombscargle(
     # 2*nterms + 1 terms for w, nterms + 1 terms for yw. Fetching the Plan
     nSW = 2*nterms + 1
     nSY = nterms + 1
-    Sw  = np.zeros((nSW, Nbatch, Nf), dtype=dtype) # Shape(nSW, Nbatch, Nf) and Initlize to 0
-    Cw  = np.zeros((nSW, Nbatch, Nf), dtype=dtype)
-    Syw = np.zeros((nSY, Nbatch, Nf), dtype=dtype)
-    Cyw = np.zeros((nSY, Nbatch, Nf), dtype=dtype)
+    Sw  = np.zeros((Nbatch, nSW, Nf), dtype=dtype) # Shape(Nbatch, nSW, Nf) and Initlize to 0
+    Cw  = np.zeros((Nbatch, nSW, Nf), dtype=dtype)
+    Syw = np.zeros((Nbatch, nSY, Nf), dtype=dtype)
+    Cyw = np.zeros((Nbatch, nSY, Nf), dtype=dtype)
 
     t_helpers = -timer()
     if not _no_cpp_helpers: # Use C++ helpers
@@ -267,10 +268,10 @@ def lombscargle(
         
         # SCw = [(np.zeros(Nf), ws * np.ones(Nf))]
         # SCyw = [(np.zeros(Nf), yws * np.ones(Nf))]
-        Sw[0,:,:] = 0
-        Cw[0,:,:] = w2s  # broadcasting w2s from (Nbatch, 1) to (Nbatch, Nf)
-        Syw[0,:,:] = 0
-        Cyw[0,:,:] = yws  # broadcasting yws from (Nbatch, 1) to (Nbatch, Nf)
+        Sw[:,0,:] = 0
+        Cw[:,0,:] = w2s  # broadcasting w2s from (Nbatch, 1) to (Nbatch, Nf)
+        Syw[:,0,:] = 0
+        Cyw[:,0,:] = yws  # broadcasting yws from (Nbatch, 1) to (Nbatch, Nf)
 
     # This function applies a time shift to the reference time t1 and computes
     # the corresponding phase shifts. It then creates a new batch of weights
@@ -301,10 +302,13 @@ def lombscargle(
         nthreads=nthreads_finufft,
         **finufft_kwargs,
     )
+    
+    # Pre-allocate arrays for compute_t to avoid repeated allocations
+    tj = np.empty_like(t1)
+    yw_w_j = np.empty_like(yw_w)
+    
     for j in range(1, nterms + 1):
         if not _no_cpp_helpers: # Using C++ helpers
-            tj = np.empty_like(t1)
-            yw_w_j = np.empty_like(yw_w)
             chi2_helpers.compute_t(t1, yw_w, j, fmin, df, Nf, tj, yw_w_j, nthreads_helpers)
         else:
             tj, yw_w_j = compute_t(j, yw_w)
@@ -312,10 +316,10 @@ def lombscargle(
         f1_fw = plan_yw.execute(yw_w_j)
         # TODO: use out parameter in finufft.Plan.execute() to 
         # write directly to Sw/Cw/Syw/Cyw arrays and avoid copying
-        Sw[j,:,:] = f1_fw[Nbatch:].imag# yw
-        Cw[j,:,:] = f1_fw[Nbatch:].real
-        Syw[j,:,:] = f1_fw[:Nbatch].imag
-        Cyw[j,:,:] = f1_fw[:Nbatch].real
+        Sw[:,j,:] = f1_fw[Nbatch:].imag# yw
+        Cw[:,j,:] = f1_fw[Nbatch:].real
+        Syw[:,j,:] = f1_fw[:Nbatch].imag
+        Cyw[:,j,:] = f1_fw[:Nbatch].real
 
     # Since in fastchi2, the freq_factor of w includes terms 
     # from 1 to 2*nterms, we need one more loop to handle 
@@ -328,17 +332,20 @@ def lombscargle(
         nthreads=nthreads_finufft,
         **finufft_kwargs,
     )
+    
+    # Pre-allocate arrays for the second loop
+    ti = np.empty_like(t1)
+    yw_w_i = np.empty_like(yw_w)
+    
     for i in range(nterms + 1, 2 * nterms + 1):
         if not _no_cpp_helpers:
-            ti = np.empty_like(t1)
-            yw_w_i = np.empty_like(yw_w)
             chi2_helpers.compute_t(t1, yw_w, i, fmin, df, Nf, ti, yw_w_i, nthreads_helpers)
         else:
             ti, yw_w_i = compute_t(i, yw_w)
         plan_w.setpts(ti)     
         f2_all = plan_w.execute(yw_w_i[Nbatch:]) # w only
-        Sw[i,:,:] = f2_all.imag
-        Cw[i,:,:] = f2_all.real
+        Sw[:,i,:] = f2_all.imag
+        Cw[:,i,:] = f2_all.real
     t_finufft += timer()
 
     t_helpers -= timer()
@@ -376,12 +383,12 @@ def lombscargle(
         # sine and cosine basis terms and their weighted versions.
         def create_funcs(Sw_b, Cw_b, Syw_b, Cyw_b):
             return {
-            'S': lambda m, i: Syw_b[m][i],
-            'C': lambda m, i: Cyw_b[m][i],
-            'SS': lambda m, n, i: 0.5 * (Cw_b[abs(m - n)][i] - Cw_b[m + n][i]),
-            'CC': lambda m, n, i: 0.5 * (Cw_b[abs(m - n)][i] + Cw_b[m + n][i]),
-            'SC': lambda m, n, i: 0.5 * (np.sign(m - n) * Sw_b[abs(m - n)][i] + Sw_b[m + n][i]),
-            'CS': lambda m, n, i: 0.5 * (np.sign(n - m) * Sw_b[abs(n - m)][i] + Sw_b[n + m][i]),
+            'S': lambda m, i: Syw_b[m, i],
+            'C': lambda m, i: Cyw_b[m, i],
+            'SS': lambda m, n, i: 0.5 * (Cw_b[abs(m - n), i] - Cw_b[m + n, i]),
+            'CC': lambda m, n, i: 0.5 * (Cw_b[abs(m - n), i] + Cw_b[m + n, i]),
+            'SC': lambda m, n, i: 0.5 * (np.sign(m - n) * Sw_b[abs(m - n), i] + Sw_b[m + n, i]),
+            'CS': lambda m, n, i: 0.5 * (np.sign(n - m) * Sw_b[abs(n - m), i] + Sw_b[n + m, i]),
             }
         
         def compute_power_single(funcs, order, i, norm_value, normalization):
@@ -410,11 +417,12 @@ def lombscargle(
             
             # # Limit BLAS threads for this batch
             # with threadpoolctl.threadpool_limits(limits=nthreads_blas, user_api='blas'):
-            # For this batch, pull out the precomputed arrays:
-            Sw_b  = [ Sw[m][batch_idx]  for m in range(2 * nterms + 1) ]  # list of (Nf,) arrays
-            Cw_b  = [ Cw[m][batch_idx]  for m in range(2 * nterms + 1) ]
-            Syw_b = [ Syw[m][batch_idx] for m in range(nterms + 1) ]
-            Cyw_b = [ Cyw[m][batch_idx] for m in range(nterms + 1) ]
+            # For this batch, directly use the array views for better performance
+            # These slices give us direct views into the arrays without creating copies
+            Sw_b = Sw[batch_idx, :, :]  # shape: (nSW, Nf)
+            Cw_b = Cw[batch_idx, :, :]
+            Syw_b = Syw[batch_idx, :, :]  # shape: (nSY, Nf)
+            Cyw_b = Cyw[batch_idx, :, :]
             # Create functions for this batch
             batch_funcs = create_funcs(Sw_b, Cw_b, Syw_b, Cyw_b)
 

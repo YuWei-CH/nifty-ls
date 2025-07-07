@@ -73,7 +73,7 @@ void process_chi2_inputs(
     auto w2s = w2s_.view();
     auto norm = norm_.view();
     auto yws = yws_.view();
-    auto Sw = Sw_.view(); // shape (nSW(factor*nterms), Nbatch, Nf)
+    auto Sw = Sw_.view(); // shape (Nbatch, nSW, Nf) - changed from (nSW, Nbatch, Nf)
     auto Cw = Cw_.view();
     auto Syw = Syw_.view();
     auto Cyw = Cyw_.view();
@@ -190,10 +190,10 @@ void process_chi2_inputs(
             // Initialize trig matrix
             for (size_t f = 0; f < Nf; ++f)
             {
-                Sw(0, i, f) = Scalar(0);
-                Syw(0, i, f) = Scalar(0);
-                Cw(0, i, f) = w2s(i, 0); // Use 2D indexing to match Python keepdims=True
-                Cyw(0, i, f) = yws(i, 0);
+                Sw(i, 0, f) = Scalar(0);
+                Syw(i, 0, f) = Scalar(0);
+                Cw(i, 0, f) = w2s(i, 0); // Use 2D indexing to match Python keepdims=True
+                Cyw(i, 0, f) = yws(i, 0);
             }
         }
     }
@@ -262,14 +262,13 @@ void process_chi2_outputs(
 {
     auto power = power_.view();                   // output
     const size_t order_size = order_types.size(); // input
-    auto Sw = Sw_.view();                         // input (n_terms, Nbatch, Nf)
+    auto Sw = Sw_.view();                         // input (Nbatch, nSW, Nf)
     auto Cw = Cw_.view();                         // input
     auto Syw = Syw_.view();                       // input
     auto Cyw = Cyw_.view();                       // input
     auto norm = norm_.view();                     // input
 
-    // const size_t n_terms = Sw.shape(0);
-    const size_t Nbatch = Sw.shape(1);
+    const size_t Nbatch = Sw.shape(0); // Updated index for new array layout
     const size_t Nf = Sw.shape(2);
 
 #ifdef _OPENMP
@@ -286,6 +285,15 @@ void process_chi2_outputs(
 #pragma omp parallel num_threads(nthreads)
 #endif
     {
+        // Pre-allocate arrays to avoid repeated allocations
+        std::vector<std::vector<Scalar>> XTX(order_size, std::vector<Scalar>(order_size));
+        std::vector<Scalar> XTy(order_size);
+        std::vector<Scalar> sw_local(Sw.shape(1));
+        std::vector<Scalar> cw_local(Cw.shape(1));
+        std::vector<Scalar> A(order_size * order_size);
+        std::vector<Scalar> bvec(order_size);
+        std::vector<lapack_int> ipiv(order_size);
+
 #ifdef _OPENMP
 #pragma omp single
 #pragma omp taskloop
@@ -299,24 +307,27 @@ void process_chi2_outputs(
 #endif
             for (size_t f = 0; f < Nf; ++f)
             {
-                // Build XTX matrix and XTy vector for this batch and frequency
-                // Bottle Neck!
-                std::vector<std::vector<Scalar>> XTX(order_size, std::vector<Scalar>(order_size));
-                std::vector<Scalar> XTy(order_size, 0.0);
+                // Prefetch data into local arrays
+                for (size_t i = 0; i < Sw.shape(1); ++i)
+                {
+                    sw_local[i] = Sw(b, i, f);
+                    cw_local[i] = Cw(b, i, f);
+                }
 
-                // Fill XTy
+                // Fill XTy with proper indexing for new array layout
                 for (size_t i = 0; i < order_size; ++i)
                 {
                     TermType t = order_types[i]; // Sine or Cosine
                     size_t m = order_indices[i]; // Nterms
-                    XTy[i] = (t == TermType::Sine) ? Syw(m, b, f) : Cyw(m, b, f);
+                    XTy[i] = (t == TermType::Sine) ? Syw(b, m, f) : Cyw(b, m, f);
                 }
 
-                // Fill XTX
+                // Fill XTX efficiently using local arrays
                 for (size_t i = 0; i < order_size; ++i)
                 {
                     TermType ti = order_types[i];
                     size_t m = order_indices[i];
+
                     for (size_t j = 0; j < order_size; ++j)
                     {
                         TermType tj = order_types[j];
@@ -327,34 +338,43 @@ void process_chi2_outputs(
 
                         if (ti == TermType::Sine && tj == TermType::Sine)
                         {
-                            XTX[i][j] = Scalar(0.5) * (Cw(d, b, f) - Cw(s, b, f));
+                            XTX[i][j] = Scalar(0.5) * (cw_local[d] - cw_local[s]);
                         }
                         else if (ti == TermType::Cosine && tj == TermType::Cosine)
                         {
-                            XTX[i][j] = Scalar(0.5) * (Cw(d, b, f) + Cw(s, b, f));
+                            XTX[i][j] = Scalar(0.5) * (cw_local[d] + cw_local[s]);
                         }
                         else if (ti == TermType::Sine && tj == TermType::Cosine)
                         {
                             int sign = (m > n ? 1 : (m < n ? -1 : 0));
-                            XTX[i][j] = Scalar(0.5) * (sign * Sw(d, b, f) + Sw(s, b, f));
+                            XTX[i][j] = Scalar(0.5) * (sign * sw_local[d] + sw_local[s]);
                         }
                         else
                         { // Cosine, Sine
                             int sign = (n > m ? 1 : (n < m ? -1 : 0));
-                            XTX[i][j] = Scalar(0.5) * (sign * Sw(d, b, f) + Sw(s, b, f));
+                            XTX[i][j] = Scalar(0.5) * (sign * sw_local[d] + sw_local[s]);
                         }
                     }
                 }
 
-                // 2) Solve XTX * beta = XTy using genral LU decomposition
+                // 2) Solve XTX * beta = XTy using general LU decomposition
                 // Flatten into column-major for LAPACK
                 std::vector<Scalar> A(order_size * order_size);
                 for (size_t i = 0; i < order_size; ++i)
+                {
                     for (size_t j = 0; j < order_size; ++j)
+                    {
                         A[j * order_size + i] = XTX[i][j];
+                    }
+                }
+
+                // Make a copy of XTy to preserve it for dot product later
                 std::vector<Scalar> bvec = XTy;
+
                 int n = int(order_size), nrhs = 1, info;
                 std::vector<lapack_int> ipiv(n);
+
+                // Solve the system with proper error handling
                 if constexpr (std::is_same_v<Scalar, double>)
                 {
                     info = LAPACKE_dgesv(LAPACK_COL_MAJOR, n, nrhs,
@@ -385,7 +405,6 @@ void process_chi2_outputs(
 
                 power(b, f) = pw;
 
-                // TODO: Make it parallel
                 // Apply normalization
                 switch (norm_kind)
                 {
