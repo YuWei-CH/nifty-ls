@@ -52,9 +52,9 @@ void process_chi2_inputs(
     nifty_arr_1d<Scalar> t1_,
     nifty_arr_2d<Complex<Scalar>> yw_,
     nifty_arr_2d<Complex<Scalar>> w_,
-    nifty_arr_2d<Scalar> w2s_, // Changed from 1D to 2D to match Python keepdims=True
+    nifty_arr_2d<Scalar> w2s_,
     nifty_arr_2d<Scalar> norm_,
-    nifty_arr_2d<Scalar> yws_, // Changed from 1D to 2D to match Python keepdims=True
+    nifty_arr_2d<Scalar> yws_,
     nifty_arr_3d<Scalar> Sw_,
     nifty_arr_3d<Scalar> Cw_,
     nifty_arr_3d<Scalar> Syw_,
@@ -73,7 +73,7 @@ void process_chi2_inputs(
     auto w2s = w2s_.view();
     auto norm = norm_.view();
     auto yws = yws_.view();
-    auto Sw = Sw_.view(); // shape (Nbatch, nSW, Nf) - changed from (nSW, Nbatch, Nf)
+    auto Sw = Sw_.view(); // shape (Nbatch, nSW, Nf)
     auto Cw = Cw_.view();
     auto Syw = Syw_.view();
     auto Cyw = Cyw_.view();
@@ -99,68 +99,60 @@ void process_chi2_inputs(
                 nthreads, omp_get_max_threads());
     }
 #else
-    (void)nthreads; // suppress unused variable warning
+    (void)nthreads;
 #endif
 
+// Compute and store t1
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) num_threads(nthreads)
 #endif
-    // Compute t1
     for (size_t j = 0; j < N; ++j)
     {
         t1(j) = TWO_PI * df * t(j);
     }
 
-// Initialize and fill value of yw, w, w2s, norm, yws, Sw, Cw, Syw, Cyw
+    // Process each batch serially, but parallelize inner loops
+    for (size_t i = 0; i < Nbatch; ++i)
+    {
+        Scalar sum_w = Scalar(0);
+        Scalar yoff = Scalar(0);
+        Scalar sum_norm = Scalar(0);
+        Scalar sum_yw2 = Scalar(0);
+
 #ifdef _OPENMP
 #pragma omp parallel num_threads(nthreads)
 #endif
-    {
-#ifdef _OPENMP
-// Use single thread to pack the task, and rest threads will execute the task
-#pragma omp single nowait
-#pragma omp taskloop
-#endif
-        // Batch loop : compute w2s, norm, yws, and fill yw, w
-        for (size_t i = 0; i < Nbatch; ++i)
         {
-            Scalar sum_w = Scalar(0); // Type is <Scalar>, value is 0
-            Scalar yoff = Scalar(0);
-
-// First pass: sum weights and weighted y
-// w2_base = (dy ** -2.0).astype(dtype)
-// w2s = np.sum(w2_base.real, axis=-1)
-// (w2.real * y).sum(axis=-1, keepdims=True)
 #ifdef _OPENMP
-#pragma omp taskloop reduction(+ : sum_w) reduction(+ : yoff)
+#pragma omp for schedule(static) reduction(+ : sum_w, yoff)
 #endif
+            // 1. compute sum_w, yoff and fill w2s
             for (size_t j = 0; j < N; ++j)
             {
                 Scalar wt = Scalar(1) / (dy(i, j) * dy(i, j));
                 sum_w += wt;
                 yoff += wt * y(i, j);
             }
-
-            // Store sum of weights with keepdims=True shape (Nbatch, 1)
-            w2s(i, 0) = sum_w;
-
-            if (center_data || fit_mean)
+#ifdef _OPENMP
+#pragma omp single
+#endif
             {
-                // ((w2.real * y).sum(axis=-1, keepdims=True) / w2s)
-                yoff /= sum_w; // Normalize yoff by the sum of weights
-            }
-            else
-            {
-                yoff = Scalar(0); // y(i, j) - yoff = y(i, j)
-            }
+                w2s(i, 0) = sum_w;
 
-            Scalar sum_norm = Scalar(0);
-            Scalar sum_yw2 = Scalar(0);
+                if (center_data || fit_mean)
+                {
+                    yoff /= sum_w;
+                }
+                else
+                {
+                    yoff = Scalar(0);
+                }
+            }
 
 #ifdef _OPENMP
-#pragma omp taskloop reduction(+ : sum_norm) reduction(+ : sum_yw2)
+#pragma omp for schedule(static) reduction(+ : sum_norm, sum_yw2)
 #endif
-            // Second pass: compute norm, yws, and fill arrays
+            // 2. compute norm, yws, and fill yw, w
             for (size_t m = 0; m < N; ++m)
             {
                 Scalar wt = Scalar(1) / (dy(i, m) * dy(i, m));
@@ -168,31 +160,32 @@ void process_chi2_inputs(
                 sum_norm += wt * (ym * ym);
                 sum_yw2 += ym * wt;
 
-                // Construct a complex number for yw and w
                 yw(i, m) = std::complex<Scalar>(ym * wt, Scalar(0));
                 w(i, m) = std::complex<Scalar>(wt, Scalar(0));
             }
-            // norm = (w2.real * y**2).sum(axis=-1, keepdims=True)
-            norm(i, 0) = sum_norm;
-            // yws = (y * w2.real).sum(axis=-1, keepdims=True)
-            if (center_data || fit_mean)
-            {
-                yws(i, 0) = Scalar(0); // Mathematically, fit_mean or center_data will set yws to 0
-            }
-            else
-            {
-                yws(i, 0) = sum_yw2; // Use the sum of weighted y directly
-            }
-
 #ifdef _OPENMP
-#pragma omp taskloop
+#pragma omp single
 #endif
-            // Initialize trig matrix
+            {
+                norm(i, 0) = sum_norm;
+                if (center_data || fit_mean)
+                {
+                    yws(i, 0) = Scalar(0); // Mathematically, fit_mean or center_data will set yws to 0
+                }
+                else
+                {
+                    yws(i, 0) = sum_yw2;
+                }
+            }
+#ifdef _OPENMP
+#pragma omp for schedule(static)
+#endif
+            // 3. initialize trig matrix
             for (size_t f = 0; f < Nf; ++f)
             {
                 Sw(i, 0, f) = Scalar(0);
                 Syw(i, 0, f) = Scalar(0);
-                Cw(i, 0, f) = w2s(i, 0); // Use 2D indexing to match Python keepdims=True
+                Cw(i, 0, f) = w2s(i, 0);
                 Cyw(i, 0, f) = yws(i, 0);
             }
         }
@@ -211,42 +204,44 @@ void compute_t(
     nifty_arr_2d<Complex<Scalar>> &yw_w_s_out,
     int nthreads)
 {
-    auto t1 = t1_.view();          // input
+    auto t1 = t1_.view();          // input length-N array
     auto yw_w = yw_w_.view();      // input with 2*Nbatch × N size
-    auto tn = tn_out.view();       // output length-N array
+    auto tn = tn_out.view();       // output
     auto yw_s = yw_w_s_out.view(); // output same shape as yw_w_
-
     const size_t N = t1.shape(0);
     const size_t nTrans = yw_w.shape(0);
 
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) num_threads(nthreads)
-#endif
-    // tn = time_shift * t1
-    for (size_t j = 0; j < N; ++j)
-    {
-        tn(j) = Scalar(time_shift) * t1(j);
-    }
+    Scalar factor = Scalar(Nf / 2) + fmin / df; // shift factor
 
-    // shift factor = (Nf/2) + fmin/df
-    Scalar factor = Scalar(Nf / 2) + fmin / df;
-
-    // do phase shift: phase_shiftn = np.exp(1j * ((Nf // 2) + fmin / df) * tn)
 #ifdef _OPENMP
-#pragma omp parallel for collapse(2) schedule(static) num_threads(nthreads)
+#pragma omp parallel num_threads(nthreads)
 #endif
-    for (size_t b = 0; b < nTrans; ++b)
     {
+#ifdef _OPENMP
+#pragma omp for schedule(static)
+#endif
+        // tn = time_shift * t1
+        for (size_t j = 0; j < N; ++j)
+        {
+            tn(j) = Scalar(time_shift) * t1(j);
+        }
+
+#ifdef _OPENMP
+        size_t chunk_size = std::max(size_t(8), N / nthreads);
+#pragma omp for schedule(static, chunk_size)
+#endif
+        // Do phase shift: phase_shift = np.exp(1j * ((Nf // 2) + fmin / df) * tn)
         for (size_t j = 0; j < N; ++j)
         {
             Complex<Scalar> phase = std::exp(Complex<Scalar>(0, factor * tn(j)));
-            yw_s(b, j) = yw_w(b, j) * phase;
+            for (size_t b = 0; b < nTrans; ++b)
+            {
+                yw_s(b, j) = yw_w(b, j) * phase;
+            }
         }
     }
 }
 
-// TODO: Using namespace std
-// TODO: check pass by reference or by value
 template <typename Scalar>
 void process_chi2_outputs(
     nifty_arr_2d<Scalar> power_,
@@ -255,20 +250,22 @@ void process_chi2_outputs(
     nifty_arr_3d<const Scalar> Syw_,
     nifty_arr_3d<const Scalar> Cyw_,
     nifty_arr_2d<const Scalar> norm_,
-    const std::vector<TermType> &order_types,
-    const std::vector<size_t> &order_indices,
+    const std::vector<TermType> &order_types, // Sine or Cosine
+    const std::vector<size_t> &order_indices, // Nterms
     const NormKind norm_kind,
     int nthreads)
 {
     auto power = power_.view();                   // output
     const size_t order_size = order_types.size(); // input
-    auto Sw = Sw_.view();                         // input (Nbatch, nSW, Nf)
-    auto Cw = Cw_.view();                         // input
-    auto Syw = Syw_.view();                       // input
-    auto Cyw = Cyw_.view();                       // input
-    auto norm = norm_.view();                     // input
 
-    const size_t Nbatch = Sw.shape(0); // Updated index for new array layout
+    auto Sw = Sw_.view();     // input (Nbatch, nSW, Nf)
+    auto Cw = Cw_.view();     // input
+    auto Syw = Syw_.view();   // input
+    auto Cyw = Cyw_.view();   // input
+    auto norm = norm_.view(); // input
+
+    const size_t Nbatch = Sw.shape(0);
+    const size_t nSW = Sw.shape(1);
     const size_t Nf = Sw.shape(2);
 
 #ifdef _OPENMP
@@ -285,30 +282,24 @@ void process_chi2_outputs(
 #pragma omp parallel num_threads(nthreads)
 #endif
     {
-        // Pre-allocate arrays to avoid repeated allocations
-        std::vector<std::vector<Scalar>> XTX(order_size, std::vector<Scalar>(order_size));
+        // Allocate arrays for each thread
         std::vector<Scalar> XTy(order_size);
-        std::vector<Scalar> sw_local(Sw.shape(1));
-        std::vector<Scalar> cw_local(Cw.shape(1));
-        std::vector<Scalar> A(order_size * order_size);
+        std::vector<Scalar> XTX(order_size * order_size); // Flat matrix for XTX
         std::vector<Scalar> bvec(order_size);
         std::vector<lapack_int> ipiv(order_size);
 
+        std::vector<Scalar> sw_local(nSW);
+        std::vector<Scalar> cw_local(nSW);
 #ifdef _OPENMP
-#pragma omp single
-#pragma omp taskloop
+#pragma omp for collapse(2) schedule(static)
 #endif
         for (size_t b = 0; b < Nbatch; ++b)
         {
-// Parallelize batch processing with taskloop to achieve dynamic load balancing,
-// since the cost of LU decomposition varies across batches.
-#ifdef _OPENMP
-#pragma omp taskloop
-#endif
             for (size_t f = 0; f < Nf; ++f)
             {
+                Scalar norm_val = norm(b, 0);
                 // Prefetch data into local arrays
-                for (size_t i = 0; i < Sw.shape(1); ++i)
+                for (size_t i = 0; i < nSW; ++i)
                 {
                     sw_local[i] = Sw(b, i, f);
                     cw_local[i] = Cw(b, i, f);
@@ -317,8 +308,8 @@ void process_chi2_outputs(
                 // Fill XTy with proper indexing for new array layout
                 for (size_t i = 0; i < order_size; ++i)
                 {
-                    TermType t = order_types[i]; // Sine or Cosine
-                    size_t m = order_indices[i]; // Nterms
+                    TermType t = order_types[i];
+                    size_t m = order_indices[i];
                     XTy[i] = (t == TermType::Sine) ? Syw(b, m, f) : Cyw(b, m, f);
                 }
 
@@ -327,7 +318,6 @@ void process_chi2_outputs(
                 {
                     TermType ti = order_types[i];
                     size_t m = order_indices[i];
-
                     for (size_t j = 0; j < order_size; ++j)
                     {
                         TermType tj = order_types[j];
@@ -338,61 +328,50 @@ void process_chi2_outputs(
 
                         if (ti == TermType::Sine && tj == TermType::Sine)
                         {
-                            XTX[i][j] = Scalar(0.5) * (cw_local[d] - cw_local[s]);
+                            XTX[j * order_size + i] = Scalar(0.5) * (cw_local[d] - cw_local[s]);
                         }
                         else if (ti == TermType::Cosine && tj == TermType::Cosine)
                         {
-                            XTX[i][j] = Scalar(0.5) * (cw_local[d] + cw_local[s]);
+                            XTX[j * order_size + i] = Scalar(0.5) * (cw_local[d] + cw_local[s]);
                         }
                         else if (ti == TermType::Sine && tj == TermType::Cosine)
                         {
                             int sign = (m > n ? 1 : (m < n ? -1 : 0));
-                            XTX[i][j] = Scalar(0.5) * (sign * sw_local[d] + sw_local[s]);
+                            XTX[j * order_size + i] = Scalar(0.5) * (sign * sw_local[d] + sw_local[s]);
                         }
                         else
-                        { // Cosine, Sine
+                        {
                             int sign = (n > m ? 1 : (n < m ? -1 : 0));
-                            XTX[i][j] = Scalar(0.5) * (sign * sw_local[d] + sw_local[s]);
+                            XTX[j * order_size + i] = Scalar(0.5) * (sign * sw_local[d] + sw_local[s]);
                         }
                     }
                 }
 
-                // 2) Solve XTX * beta = XTy using general LU decomposition
-                // Flatten into column-major for LAPACK
-                std::vector<Scalar> A(order_size * order_size);
-                for (size_t i = 0; i < order_size; ++i)
-                {
-                    for (size_t j = 0; j < order_size; ++j)
-                    {
-                        A[j * order_size + i] = XTX[i][j];
-                    }
-                }
+                // Copy XTy to preserve it for dot product later
+                std::copy(XTy.begin(), XTy.end(), bvec.begin());
 
-                // Make a copy of XTy to preserve it for dot product later
-                std::vector<Scalar> bvec = XTy;
-
+                // n: size of the matrix, nrhs: number of right-hand sides(columns)
                 int n = int(order_size), nrhs = 1, info;
-                std::vector<lapack_int> ipiv(n);
 
-                // Solve the system with proper error handling
+                // Solve A * X = B for GE matrices
                 if constexpr (std::is_same_v<Scalar, double>)
                 {
                     info = LAPACKE_dgesv(LAPACK_COL_MAJOR, n, nrhs,
-                                         A.data(), n,
+                                         XTX.data(), n,
                                          ipiv.data(),
                                          bvec.data(), n);
                 }
                 else
                 {
                     info = LAPACKE_sgesv(LAPACK_COL_MAJOR, n, nrhs,
-                                         A.data(), n,
+                                         XTX.data(), n,
                                          ipiv.data(),
                                          bvec.data(), n);
                 }
                 if (info != 0)
                     throw std::runtime_error("LU solve failed (LAPACKE_dgesv/sgesv returned non-zero)");
 
-                // 3) Compute dot(XTy, beta)
+                // Dot product (XTy, bvec)
                 Scalar pw;
                 if constexpr (std::is_same_v<Scalar, double>)
                 {
@@ -404,21 +383,22 @@ void process_chi2_outputs(
                 }
 
                 power(b, f) = pw;
+                Scalar &p = power(b, f);
 
                 // Apply normalization
                 switch (norm_kind)
                 {
                 case NormKind::Standard:
-                    power(b, f) /= norm(b, 0);
+                    p /= norm_val;
                     break;
                 case NormKind::Model:
-                    power(b, f) /= (norm(b, 0) - power(b, f));
+                    p /= (norm_val - p);
                     break;
                 case NormKind::Log:
-                    power(b, f) = -std::log(1 - power(b, f) / norm(b, 0));
+                    p = -std::log(1 - p / norm_val);
                     break;
                 case NormKind::PSD:
-                    power(b, f) *= 0.5;
+                    p *= Scalar(0.5);
                     break;
                 }
             }
