@@ -48,6 +48,37 @@ def nifty_backend(request):
         pytest.skip(f'Backend {request.param} is not available')
 
 
+@pytest.mark.parametrize('nifty_backend,nterms', [('auto',None), ('auto', 1), ('auto',2)], indirect=['nifty_backend'])
+def test_auto_backend_selection(data, nifty_backend, nterms, Nf=1000):
+    """Test that the auto backend selection works as expected"""
+    backend_fn, _ = nifty_backend
+    nifty_res = backend_fn(**data, Nf=Nf, nterms=nterms).power
+    
+    if (nterms and nterms > 1):
+        brute_res = astropy_ls_fastchi2(**data, nterms=nterms, Nf=Nf, use_fft=False)
+    else:
+        brute_res = astropy_ls(**data, Nf=Nf, use_fft=False)
+    dtype = data['t'].dtype
+
+    np.testing.assert_allclose(
+        nifty_res,
+        brute_res,
+        rtol=rtol(dtype, Nf),
+    )
+
+
+def test_backend_error_handling(data, Nf=1000):
+    """Test error handling for incompatible backend and nterms combinations"""
+    
+    # Test error when using finufft with nterms > 1
+    with pytest.raises(ValueError, match='Backend "finufft" only supports nterms == 1. Use "finufft_chi2" for nterms > 1.'):
+        nifty_ls.lombscargle(**data, Nf=Nf, backend="finufft", nterms=2)
+    
+    # Test error with unknown backend
+    with pytest.raises(ValueError, match="Unknown or unavailable backend"):
+        nifty_ls.lombscargle(**data, Nf=Nf, backend="non_existed_backend", nterms=1)
+
+
 @pytest.mark.parametrize('Nf', [1_000, 10_000, 100_000])
 @pytest.mark.parametrize('nifty_backend,nterms', [('finufft',None), ('finufft',1), ('finufft_chi2',1), ('finufft_chi2',2), ('cufinufft',None)], indirect=['nifty_backend'])
 def test_lombscargle(data, Nf, nifty_backend, nterms):
@@ -66,29 +97,6 @@ def test_lombscargle(data, Nf, nifty_backend, nterms):
         brute_res,
         rtol=rtol(dtype, Nf),
     )
-
-
-# @pytest.mark.parametrize('nifty_backend,nterms', 
-#                          [('auto',None), ('finufft',1), ('finufft_chi2',1), ('finufft_chi2',2), ('cufinufft',None)], indirect=['nifty_backend'])
-# def test_auto_backend_selection(data, Nf=1000):
-#     """Test that the auto backend selection works as expected"""
-    
-#     result = nifty_backend(**data, Nf=Nf, backend=nifty_backend, nterms=nterms)
-#     expected_backend = "cufinufft" if "cufinufft" in nifty_ls.core.AVAILABLE_BACKENDS else "finufft"
-#     assert result.backend == expected_backend
-
-
-# def test_backend_error_handling(data, Nf=1000):
-#     """Test error handling for incompatible backend and nterms combinations"""
-    
-#     # Test error when using finufft with nterms > 1
-#     with pytest.raises(ValueError, match="Please install and select the \"finufft_chi2\" backend when nterms > 1"):
-#         nifty_ls.lombscargle(**data, Nf=Nf, backend="finufft", nterms=4)
-    
-#     # Test error with unknown backend
-#     with pytest.raises(ValueError, match="Unknown or unavailable backend"):
-#         nifty_ls.lombscargle(**data, Nf=Nf, backend="fanufft", nterms=1)
-
 
 @pytest.mark.parametrize('nifty_backend,nterms', [('finufft',None), ('finufft',1), ('finufft_chi2',1), ('finufft_chi2',2), ('cufinufft',None)], indirect=['nifty_backend'])
 def test_batched(batched_data, nifty_backend, nterms, Nf=1000):
@@ -324,7 +332,7 @@ def test_dy_none(data, batched_data, nifty_backend, nterms, Nf=1000):
     np.testing.assert_allclose(nifty_res, astropy_res, rtol=rtol(dtype, Nf))
 
 
-def test_backends(data, nterms=None, Nf=1000):
+def test_backends(data, nterms=1, Nf=1000):
     """Test that all the backends give the same answer,
     without reference to astropy
     """

@@ -16,7 +16,7 @@ def available_backends(verbose: bool = False) -> list[str]:
     for backend in BACKEND_NAMES:
         if backend == 'auto':
             # 'auto' is a special case, it is not a backend but a mode to select the best available backend
-            continue
+            backends.append(backend)
         try:
             # from . import backend
             import_module(f'.{backend}', __package__)
