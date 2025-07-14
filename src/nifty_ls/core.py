@@ -82,7 +82,7 @@ def lombscargle(
         The backend to use for the computation. Default is 'auto' which selects the best available backend.
     nterms : int, optional
         The number of terms to use in the Lomb-Scargle computation. Must be at least 1.
-        If greater than 1, the 'finufft_chi2' backend should be used.
+        If greater than 1, the 'cufinufft_chi2' or 'finufft_chi2' should be used for backend.
     backend_kwargs : dict, optional  
         Additional keyword arguments to pass to the backend.
 
@@ -111,11 +111,13 @@ def lombscargle(
     # Backend selection
     if backend == 'auto':
         if nterms > 1:
+            if 'cufinufft_chi2' in AVAILABLE_BACKENDS:
+                backend = 'cufinufft_chi2'
             if 'finufft_chi2' in AVAILABLE_BACKENDS:
                 backend = 'finufft_chi2'
             else:
                 raise ValueError(
-                    'Please install and select the "finufft_chi2" backend when nterms > 1.'
+                    'Please install and select the "cufinufft_chi2" or "finufft_chi2" backend when nterms > 1.'
                 )
         elif 'cufinufft' in AVAILABLE_BACKENDS:
             backend = 'cufinufft'
@@ -133,9 +135,9 @@ def lombscargle(
     if backend in ('finufft', 'cufinufft') and nterms > 1:
         raise ValueError(
             f'Backend "{backend}" only supports nterms == 1. '
-            'Use "finufft_chi2" for nterms > 1.'
+            'Use "cufinufft_chi2" or "finufft_chi2" for nterms > 1.'
         )
-    if backend == 'finufft_chi2':
+    if backend == 'cufinufft_chi2' or backend == 'finufft_chi2':
         # Add nterms to backend_kwargs and pass it to the backend
         backend_kwargs.setdefault('nterms', nterms)
     

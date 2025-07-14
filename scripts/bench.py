@@ -26,7 +26,7 @@ import astropy.timeseries.periodograms.lombscargle.implementations.chi2_impl as 
 DEFAULT_N = 3554
 DEFAULT_NF = None  # 10**5
 DEFAULT_DTYPE = 'f8'
-DEFAULT_METHODS = ['cufinufft', 'finufft', 'astropy', 'finufft_chi2', 'astropy_fastchi2']
+DEFAULT_METHODS = ['cufinufft', 'cufinufft_chi2', 'finufft', 'astropy', 'finufft_chi2', 'astropy_fastchi2']
 NTHREAD_MAX = len(os.sched_getaffinity(0))
 DEFAULT_FFTW = nifty_ls.finufft.FFTW_MEASURE
 DEFAULT_EPS = 1e-9
@@ -48,6 +48,14 @@ def do_nifty_finufft_chi2(*args, nterms=2, **kwargs):
         **kwargs,
         nterms=nterms,
         finufft_kwargs={'fftw': DEFAULT_FFTW, 'eps': DEFAULT_EPS},
+    )
+
+def do_nifty_cufinufft_chi2(*args, nterms=2, **kwargs):
+    return nifty_ls.cufinufft_chi2.lombscargle(
+        *args,
+        **kwargs,
+        nterms=nterms,
+        cufinufft_kwargs={'eps': DEFAULT_EPS}
     )
 
 
@@ -106,6 +114,7 @@ METHODS = {
     'finufft_chi2_par': do_nifty_finufft_chi2,
     'finufft_chi2': lambda *args, **kwargs: do_nifty_finufft_chi2(*args, **kwargs, nthreads=1),
     'cufinufft': do_nifty_cufinufft,
+    'cufinufft_chi2': do_nifty_cufinufft_chi2,
     'astropy': do_astropy_fast,
     'astropy_brute': lambda *args, **kwargs: do_astropy_fast(*args, **kwargs, use_fft=False),
     'astropy_fastchi2': do_astropy_fastchi2,
@@ -180,6 +189,7 @@ def autorange(timer: timeit.Timer, min_time=2.0):
 
 
 def get_plot_kwargs(method, nthread_max=NTHREAD_MAX):
+    # Group 1: finufft methods - same color, different shapes
     if method == 'finufft_par':
         label = (
             'nifty-ls (finufft)' if nthread_max == 1 else 'nifty-ls (finufft, parallel)'
@@ -190,10 +200,29 @@ def get_plot_kwargs(method, nthread_max=NTHREAD_MAX):
         label = 'nifty-ls (finufft)'
         color = 'C1'
         ls = '-'
+    # Group 2: cufinufft methods - different color
     elif method == 'cufinufft':
         label = 'nifty-ls (cufinufft)'
         color = 'C2'
         ls = '-'
+    # Group 3: astropy and winding methods - different color, same family
+    elif method == 'astropy':
+        label = r'Astropy (${\tt fast}$ method)'
+        color = 'C0'
+        ls = '-'
+    elif method == 'astropy_brute':
+        label = r'Astropy (brute force)'
+        color = 'C0'
+        ls = '--'
+    elif method == 'astropy_worst':
+        label = r'Astropy (worst case)'
+        color = 'C0'
+        ls = ':'
+    elif method == 'winding':
+        label = 'nifty-ls (winding)'
+        color = 'C0'
+        ls = '-.'
+    # Group 4: finufft_chi2 methods - same color, different shapes
     elif method == 'finufft_chi2_par':
         label = (
             'nifty-ls (finufft chi2)' if nthread_max == 1 else 'nifty-ls (finufft chi2, parallel)'
@@ -204,34 +233,24 @@ def get_plot_kwargs(method, nthread_max=NTHREAD_MAX):
         label = 'nifty-ls (finufft chi2)'
         color = 'C3'
         ls = '-'
-    elif method == 'astropy':
-        label = r'Astropy (${\tt fast}$ method)'
-        color = 'C0'
+    # Group 5: cufinufft_chi2 methods - different color
+    elif method == 'cufinufft_chi2':
+        label = 'nifty-ls (cufinufft chi2)'
+        color = 'C4'
         ls = '-'
-    elif method == 'astropy_brute':
-        label = r'Astropy (brute force)'
-        color = 'C0'
-        ls = '--'
+    # Group 6: astropy_fastchi2 methods - different color, same family
     elif method == 'astropy_fastchi2':
         label = r'Astropy (${\tt fastchi2}$ method)'
-        color = 'C4'
-        ls = '--'
-    elif method == 'astropy_chi2':
-        label = r'Astropy (${\tt chi2}$ method)'
-        color = 'C4'
-        ls = '-.'
-    elif method == 'astropy_fastchi2_brute':
-        label = r'Astropy (${\tt fastchi2}$ brute force)'
-        color = 'C4'
-        ls = '-'
-    elif method == 'astropy_worst':
-        label = r'Astropy (worst case)'
-        color = 'C0'
-        ls = ':'
-    elif method == 'winding':
-        label = 'nifty-ls (winding)'
         color = 'C5'
         ls = '-'
+    elif method == 'astropy_chi2':
+        label = r'Astropy (${\tt chi2}$ method)'
+        color = 'C5'
+        ls = '--'
+    elif method == 'astropy_fastchi2_brute':
+        label = r'Astropy (${\tt fastchi2}$ brute force)'
+        color = 'C5'
+        ls = '-.'
     else:
         label = method
         color = 'C6'

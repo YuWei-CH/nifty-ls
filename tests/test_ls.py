@@ -71,7 +71,7 @@ def test_backend_error_handling(data, Nf=1000):
     """Test error handling for incompatible backend and nterms combinations"""
     
     # Test error when using finufft with nterms > 1
-    with pytest.raises(ValueError, match='Backend "finufft" only supports nterms == 1. Use "finufft_chi2" for nterms > 1.'):
+    with pytest.raises(ValueError, match='Backend "finufft" only supports nterms == 1. Use "cufinufft_chi2" or "finufft_chi2" for nterms > 1.'):
         nifty_ls.lombscargle(**data, Nf=Nf, backend="finufft", nterms=2)
     
     # Test error with unknown backend
@@ -80,13 +80,14 @@ def test_backend_error_handling(data, Nf=1000):
 
 
 @pytest.mark.parametrize('Nf', [1_000, 10_000, 100_000])
-@pytest.mark.parametrize('nifty_backend,nterms', [('finufft',None), ('finufft',1), ('finufft_chi2',1), ('finufft_chi2',2), ('cufinufft',None)], indirect=['nifty_backend'])
+@pytest.mark.parametrize('nifty_backend,nterms', [('finufft',None), ('finufft',1), ('finufft_chi2',1), ('finufft_chi2',2), 
+                                                  ('cufinufft',None), ('cufinufft_chi2',1), ('cufinufft_chi2',2)], indirect=['nifty_backend'])
 def test_lombscargle(data, Nf, nifty_backend, nterms):
     """Check that the basic implementation agrees with the brute-force Astropy answer"""
     
     backend_fn, backend_name = nifty_backend
     nifty_res = backend_fn(**data, Nf=Nf, nterms=nterms).power
-    if backend_name == 'finufft_chi2':
+    if backend_name == 'cufinufft_chi2' or backend_name == 'finufft_chi2':
         brute_res = astropy_ls_fastchi2(**data, nterms=nterms, Nf=Nf, use_fft=False)
     else:
         brute_res = astropy_ls(**data, Nf=Nf, use_fft=False)
@@ -98,7 +99,8 @@ def test_lombscargle(data, Nf, nifty_backend, nterms):
         rtol=rtol(dtype, Nf),
     )
 
-@pytest.mark.parametrize('nifty_backend,nterms', [('finufft',None), ('finufft',1), ('finufft_chi2',1), ('finufft_chi2',2), ('cufinufft',None)], indirect=['nifty_backend'])
+@pytest.mark.parametrize('nifty_backend,nterms', [('finufft',None), ('finufft',1), ('finufft_chi2',1), ('finufft_chi2',2), 
+                                                  ('cufinufft',None), ('cufinufft_chi2',1), ('cufinufft_chi2',2)], indirect=['nifty_backend'])
 def test_batched(batched_data, nifty_backend, nterms, Nf=1000):
     """Check various batching modes with different backends and nterms"""
     
@@ -113,7 +115,7 @@ def test_batched(batched_data, nifty_backend, nterms, Nf=1000):
 
     brute_res = np.empty((len(y_batch), Nf), dtype=y_batch.dtype)
     for i in range(len(y_batch)):
-        if backend_name == 'finufft_chi2':
+        if backend_name == 'finufft_chi2' or backend_name == 'cufinufft_chi2':
             brute_res[i] = astropy_ls_fastchi2(
                 t, y_batch[i], dy_batch[i], fmin, fmax, Nf, nterms=nterms, use_fft=False
             )
@@ -132,7 +134,8 @@ def test_batched(batched_data, nifty_backend, nterms, Nf=1000):
         rtol=rtol(dtype, Nf) * 10,
     )
 
-@pytest.mark.parametrize('nifty_backend,nterms', [('finufft',None), ('finufft_chi2',1), ('finufft_chi2',2), ('cufinufft',None)], indirect=['nifty_backend'])
+@pytest.mark.parametrize('nifty_backend,nterms', [('finufft',None), ('finufft_chi2',1), ('finufft_chi2',2), ('cufinufft',None)
+                                                  , ('cufinufft_chi2',1), ('cufinufft_chi2',2)], indirect=['nifty_backend'])
 def test_normalization(data, nifty_backend, nterms, Nf=1000):
     """Check that the normalization modes work as expected"""
 
@@ -145,7 +148,7 @@ def test_normalization(data, nifty_backend, nterms, Nf=1000):
             nterms=nterms,
             normalization=norm,
         ).power
-        if backend_name == 'finufft_chi2':
+        if backend_name == 'finufft_chi2' or backend_name == 'cufinufft_chi2':
             astropy_res = astropy_ls_fastchi2(
                 **data,
                 Nf=Nf,
@@ -220,14 +223,15 @@ def test_no_cpp_helpers(data, batched_data, nifty_backend, nterms, Nf=1000):
 
 
 @pytest.mark.parametrize('center_data', [True, False])
-@pytest.mark.parametrize('nifty_backend,nterms', [('finufft',None), ('finufft_chi2',1), ('finufft_chi2',2), ('cufinufft',None)], indirect=['nifty_backend'])
+@pytest.mark.parametrize('nifty_backend,nterms', [('finufft',None), ('finufft_chi2',1), ('finufft_chi2',2), 
+                                                  ('cufinufft',None), ('cufinufft_chi2',1), ('cufinufft_chi2',2)], indirect=['nifty_backend'])
 def test_center_data(data, center_data, nterms, nifty_backend, Nf=1000):
     
     backend_fn, backend_name = nifty_backend
     
     center_nifty = backend_fn(**data, Nf=Nf, nterms=nterms, center_data=center_data).power
 
-    if backend_name == 'finufft_chi2':
+    if backend_name == 'finufft_chi2' or backend_name == 'cufinufft_chi2':
         center_astropy = astropy_ls_fastchi2(
             **data,
             Nf=Nf,
@@ -248,14 +252,15 @@ def test_center_data(data, center_data, nterms, nifty_backend, Nf=1000):
 
 
 @pytest.mark.parametrize('fit_mean', [True, False])
-@pytest.mark.parametrize('nifty_backend,nterms', [('finufft',None), ('finufft_chi2',1), ('finufft_chi2',2), ('cufinufft',None)], indirect=['nifty_backend'])
+@pytest.mark.parametrize('nifty_backend,nterms', [('finufft',None), ('finufft_chi2',1), ('finufft_chi2',2), 
+                                                  ('cufinufft',None), ('cufinufft_chi2',1), ('cufinufft_chi2',2)], indirect=['nifty_backend'])
 def test_fit_mean(data, fit_mean, nifty_backend, nterms, Nf=1000):
     
     backend_fn, backend_name = nifty_backend
     
     fitmean_nifty = backend_fn(**data, Nf=Nf, fit_mean=fit_mean, nterms=nterms).power
 
-    if backend_name == 'finufft_chi2':
+    if backend_name == 'finufft_chi2' or backend_name == 'cufinufft_chi2':
         fitmean_astropy = astropy_ls_fastchi2(
             **data,
             Nf=Nf,
@@ -276,7 +281,8 @@ def test_fit_mean(data, fit_mean, nifty_backend, nterms, Nf=1000):
     np.testing.assert_allclose(fitmean_nifty, fitmean_astropy, rtol=rtol(dtype, Nf))
 
 
-@pytest.mark.parametrize('nifty_backend,nterms', [('finufft',None), ('finufft_chi2',1), ('finufft_chi2',2), ('cufinufft',None)], indirect=['nifty_backend'])
+@pytest.mark.parametrize('nifty_backend,nterms', [('finufft',None), ('finufft_chi2',1), ('finufft_chi2',2), 
+                                                  ('cufinufft',None), ('cufinufft_chi2',1), ('cufinufft_chi2',1)], indirect=['nifty_backend'])
 def test_dy_none(data, batched_data, nifty_backend, nterms, Nf=1000):
     """Test that `dy = None` works properly"""
     
@@ -287,7 +293,7 @@ def test_dy_none(data, batched_data, nifty_backend, nterms, Nf=1000):
     data['dy'] = None
     nifty_res = backend_fn(**data, Nf=Nf, nterms=nterms).power
 
-    if backend_name == 'finufft_chi2':
+    if backend_name == 'finufft_chi2' or backend_name == 'cufinufft_chi2':
         astropy_res = astropy_ls_fastchi2(**data, Nf=Nf, nterms=nterms, use_fft=False)
     else:
         astropy_res = astropy_ls(**data, Nf=Nf, use_fft=False)
@@ -305,7 +311,7 @@ def test_dy_none(data, batched_data, nifty_backend, nterms, Nf=1000):
 
     astropy_res = np.empty((len(batched_data['y']), Nf), dtype=batched_data['y'].dtype)
     for i in range(len(batched_data['y'])):
-        if backend_name == 'finufft_chi2':
+        if backend_name == 'finufft_chi2' or backend_name == 'cufinufft_chi2':
             astropy_res[i] = astropy_ls_fastchi2(
                 batched_data['t'],
                 batched_data['y'][i],

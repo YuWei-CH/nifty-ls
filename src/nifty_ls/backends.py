@@ -5,7 +5,7 @@ from typing import Literal, get_args
 
 __all__ = ['available_backends', 'BACKEND_TYPE', 'BACKEND_NAMES']
 
-BACKEND_TYPE = Literal['auto', 'finufft', 'finufft_chi2', 'cufinufft']
+BACKEND_TYPE = Literal['auto', 'finufft', 'finufft_chi2', 'cufinufft', 'cufinufft_chi2']
 BACKEND_NAMES = list(get_args(BACKEND_TYPE))
 
 
