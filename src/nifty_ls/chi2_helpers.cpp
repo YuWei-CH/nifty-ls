@@ -9,6 +9,9 @@
 #include <algorithm>
 #include <vector>
 
+#include <stdexcept>
+#include <cmath>
+
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/complex.h>
@@ -242,6 +245,93 @@ void compute_t(
     }
 }
 
+// Solver for small matrices using LU decomposition with partial pivoting
+template <typename Scalar>
+void small_matrixs_solver(std::vector<Scalar> &A, std::vector<Scalar> &B, size_t n)
+{
+    // Tolerance for detecting singularity
+    const Scalar tol = static_cast<Scalar>(1e-9);
+
+    if (n == 2) // min of n
+    {
+        // Solve a 2x2 system directly using the determinant
+        Scalar det = A[0] * A[3] - A[1] * A[2]; // a11*a22 - a12*a21
+        if (std::abs(det) < tol)
+        {
+            throw std::runtime_error("Matrix is singular");
+        }
+        Scalar inv_det = static_cast<Scalar>(1.0) / det;
+        Scalar b0 = B[0];
+        Scalar b1 = B[1];
+        // Solution using inverse matrix
+        B[0] = (A[3] * b0 - A[2] * b1) * inv_det;  // (a22*b1 - a21*b2) / det
+        B[1] = (-A[1] * b0 + A[0] * b1) * inv_det; // (-a12*b1 + a11*b2) / det
+    }
+    else
+    {
+        // LU decomposition with partial pivoting for n > 2
+        for (size_t k = 0; k < n; ++k)
+        {
+            // Find pivot
+            size_t pivot = k;
+            Scalar max_val = std::abs(A[k * n + k]);
+            for (size_t i = k + 1; i < n; ++i)
+            {
+                Scalar val = std::abs(A[i * n + k]);
+                if (val > max_val)
+                {
+                    max_val = val;
+                    pivot = i;
+                }
+            }
+            if (max_val < tol)
+            {
+                throw std::runtime_error("Matrix is singular");
+            }
+            if (pivot != k)
+            {
+                // Swap rows k and pivot in A
+                for (size_t j = 0; j < n; ++j)
+                {
+                    std::swap(A[k * n + j], A[pivot * n + j]);
+                }
+                // Apply the same swap to B
+                std::swap(B[k], B[pivot]);
+            }
+            // Gaussian elimination to form L and U
+            for (size_t j = k + 1; j < n; ++j)
+            {
+                Scalar m = A[j * n + k] / A[k * n + k]; // Multiplier
+                A[j * n + k] = m;                       // Store L (below diagonal)
+                for (size_t l = k + 1; l < n; ++l)
+                {
+                    A[j * n + l] -= m * A[k * n + l]; // Update U
+                }
+            }
+        }
+
+        // Forward substitution: Solve L * Y = B
+        for (size_t i = 0; i < n; ++i)
+        {
+            for (size_t j = 0; j < i; ++j)
+            {
+                B[i] -= A[i * n + j] * B[j];
+            }
+            // L has 1s on diagonal, so no division needed
+        }
+
+        // Backward substitution: Solve U * X = Y
+        for (size_t i = n; i-- > 0;)
+        {
+            for (size_t j = i + 1; j < n; ++j)
+            {
+                B[i] -= A[i * n + j] * B[j];
+            }
+            B[i] /= A[i * n + i]; // Divide by U's diagonal element
+        }
+    }
+}
+
 template <typename Scalar>
 void process_chi2_outputs(
     nifty_arr_2d<Scalar> power_,
@@ -350,26 +440,16 @@ void process_chi2_outputs(
                 // Copy XTy to preserve it for dot product later
                 std::copy(XTy.begin(), XTy.end(), bvec.begin());
 
-                // n: size of the matrix, nrhs: number of right-hand sides(columns)
-                int n = int(order_size), nrhs = 1, info;
-
-                // Solve A * X = B for GE matrices
-                if constexpr (std::is_same_v<Scalar, double>)
+                // Custom Solver
+                size_t n = order_size;
+                try
                 {
-                    info = LAPACKE_dgesv(LAPACK_COL_MAJOR, n, nrhs,
-                                         XTX.data(), n,
-                                         ipiv.data(),
-                                         bvec.data(), n);
+                    small_matrixs_solver(XTX, bvec, n);
                 }
-                else
+                catch (const std::exception &e)
                 {
-                    info = LAPACKE_sgesv(LAPACK_COL_MAJOR, n, nrhs,
-                                         XTX.data(), n,
-                                         ipiv.data(),
-                                         bvec.data(), n);
+                    throw std::runtime_error("Custom solver failed: " + std::string(e.what()));
                 }
-                if (info != 0)
-                    throw std::runtime_error("LU solve failed (LAPACKE_dgesv/sgesv returned non-zero)");
 
                 // Dot product (XTy, bvec)
                 Scalar pw;
