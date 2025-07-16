@@ -167,34 +167,38 @@ def test_normalization(data, nifty_backend, nterms, Nf=1000):
         np.testing.assert_allclose(nifty_res, astropy_res, rtol=rtol(dtype, Nf))
 
 
-@pytest.mark.parametrize('backend', nifty_ls.backends.BACKEND_NAMES)
-def test_astropy_hook(data, backend, Nf=1000):
-    """Check that the fastnifty method is available in astropy's Lomb Scargle"""
-    if backend not in nifty_ls.core.AVAILABLE_BACKENDS:
-        pytest.skip(f'Backend {backend} is not available')
+@pytest.mark.parametrize('nifty_backend,nterms', [('finufft',1), ('finufft_chi2',2), ('cufinufft',1), 
+                                                  ('cufinufft_chi2',2)], indirect=['nifty_backend'])
+def test_astropy_hook(data, nifty_backend, nterms, Nf=1000):
 
     from astropy.timeseries import LombScargle
 
     ls = LombScargle(data['t'], data['y'], data['dy'], fit_mean=True, center_data=True)
+    ls_chi2 = LombScargle(data['t'], data['y'], data['dy'], fit_mean=True, center_data=True, nterms=nterms)
 
     freq = np.linspace(data['fmin'], data['fmax'], Nf, endpoint=True)
 
-    astropy_power = ls.power(
+    backend_fn, backend_name = nifty_backend
+    nifty_power = backend_fn(
+        **data, Nf=Nf, fit_mean=True, center_data=True, nterms=nterms
+    ).power
+    if backend_name == 'cufinufft_chi2' or backend_name == 'finufft_chi2':
+        astropy_power = ls_chi2.power(
+        freq,
+        method='fastnifty_chi2',
+        assume_regular_frequency=True,
+        method_kwds=dict(backend=backend_name),
+        )
+    else:
+        astropy_power = ls.power(
         freq,
         method='fastnifty',
         assume_regular_frequency=True,
-        method_kwds=dict(backend=backend),
-    )
-
-    nifty_power = nifty_ls.lombscargle(
-        **data, Nf=Nf, fit_mean=True, center_data=True, backend=backend
-    ).power
+        method_kwds=dict(backend=backend_name),
+        )
 
     # same backend, ought to match very closely
     np.testing.assert_allclose(astropy_power, nifty_power)
-
-
-# TODO: Implement fastnifty_chi2 method in astropy if needed
 
 
 @pytest.mark.parametrize('nifty_backend,nterms', [('finufft',None), ('finufft_chi2',1), ('finufft_chi2',2)], indirect=['nifty_backend'])
