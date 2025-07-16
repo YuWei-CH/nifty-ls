@@ -69,7 +69,6 @@ def test_auto_backend_selection(data, nifty_backend, nterms, Nf=1000):
 
 def test_backend_error_handling(data, Nf=1000):
     """Test error handling for incompatible backend and nterms combinations"""
-    
     # Test error when using finufft with nterms > 1
     with pytest.raises(ValueError, match='Backend "finufft" only supports nterms == 1. Use "cufinufft_chi2" or "finufft_chi2" for nterms > 1.'):
         nifty_ls.lombscargle(**data, Nf=Nf, backend="finufft", nterms=2)

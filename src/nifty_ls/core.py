@@ -113,7 +113,7 @@ def lombscargle(
         if nterms > 1:
             if 'cufinufft_chi2' in AVAILABLE_BACKENDS:
                 backend = 'cufinufft_chi2'
-            if 'finufft_chi2' in AVAILABLE_BACKENDS:
+            elif 'finufft_chi2' in AVAILABLE_BACKENDS:
                 backend = 'finufft_chi2'
             else:
                 raise ValueError(
@@ -129,8 +129,7 @@ def lombscargle(
             )
     if backend not in AVAILABLE_BACKENDS:
         raise ValueError(
-            f'Unknown or unavailable backend: "{backend}". '
-            f'Available backends: {AVAILABLE_BACKENDS}'
+            f'Unknown or unavailable backend: {backend}. Available backends are: {AVAILABLE_BACKENDS}'
         )
     if backend in ('finufft', 'cufinufft') and nterms > 1:
         raise ValueError(

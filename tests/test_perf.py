@@ -41,6 +41,8 @@ class TestPerf:
     """Benchmark nifty-ls versus astropy's FFT-based implementation."""
 
     def test(self, bench_data, Nf, benchmark, backend):
+        if (Nf == 1_000_000 and 'chi2' in backend):
+            pytest.skip(f'Skip Chi2 for large Nf to save time')
         if backend == 'astropy':
             benchmark(astropy_ls, **bench_data, Nf=Nf, use_fft=True)
         elif backend == 'astropy_fastchi2': # Nterms == 1 by default

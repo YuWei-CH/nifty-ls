@@ -16,7 +16,6 @@
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/complex.h>
 #include <nanobind/stl/vector.h>
-#include <lapacke.h>
 #include <cblas.h>
 
 #include "cpu_helpers.hpp"
@@ -246,6 +245,7 @@ void compute_t(
 }
 
 // Solver for small matrices using LU decomposition with partial pivoting
+// Using single thread
 template <typename Scalar>
 void small_matrixs_solver(std::vector<Scalar> &A, std::vector<Scalar> &B, size_t n)
 {
@@ -376,8 +376,6 @@ void process_chi2_outputs(
         std::vector<Scalar> XTy(order_size);
         std::vector<Scalar> XTX(order_size * order_size); // Flat matrix for XTX
         std::vector<Scalar> bvec(order_size);
-        std::vector<lapack_int> ipiv(order_size);
-
         std::vector<Scalar> sw_local(nSW);
         std::vector<Scalar> cw_local(nSW);
 #ifdef _OPENMP
