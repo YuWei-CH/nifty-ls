@@ -1,56 +1,4 @@
-from __future__ import annotations
-
-
 import numpy as np
-
-__all__ = ['validate_frequency_grid']
-
-
-def validate_frequency_grid(
-    fmin, fmax, Nf, t, assume_sorted_t=True, samples_per_peak=5, nyquist_factor=5
-):
-    """
-    Validate the frequency grid parameters and return them in a canonical form.
-    Follows the Astropy LombScargle conventions for samples_per_peak and nyquist_factor.
-    """
-
-    if fmin is None or fmax is None or Nf is None:
-        if assume_sorted_t:
-            baseline = t[-1] - t[0]
-        else:
-            baseline = np.ptp(t)
-
-        if baseline <= 0.0:
-            raise ValueError(
-                'The input time array must be non-degenerate, '
-                'and sorted if assume_sorted_t=True.'
-            )
-
-        target_df = 1 / (samples_per_peak * baseline)
-
-        if fmax is None:
-            avg_nyquist = 0.5 * len(t) / baseline
-            fmax = avg_nyquist * nyquist_factor
-
-        if fmin is None:
-            fmin = target_df / 2
-
-        if Nf is None:
-            Nf = 1 + int(np.round((fmax - fmin) / target_df))
-
-    fmin = float(fmin)
-    fmax = float(fmax)
-    Nf = int(Nf)
-
-    if fmin >= fmax:
-        raise ValueError('fmin must be less than fmax')
-
-    if Nf < 1:
-        raise ValueError('Nf must be a positive integer')
-
-    df = (fmax - fmin) / (Nf - 1)  # fmax inclusive
-
-    return fmin, df, Nf
 
 def validate_frequency_grid_mp(
     fmin, fmax, Nf, t_list, assume_sorted_t=True, samples_per_peak=5, nyquist_factor=5
@@ -121,16 +69,44 @@ def validate_frequency_grid_mp(
 
     return fmin_lst, df_lst, Nf_lst
 
-def same_dtype_or_raise(**arrays):
-    """
-    Check if all arrays have the same dtype, raise ValueError if not.
-    """
-    dtypes = {n: a.dtype for (n, a) in arrays.items() if a is not None}
-    names = list(dtypes.keys())
+def gen_data_mp(N_series=100_000, N_batch=None, N_d=100, dtype=np.float64, seed=5043):
+    rng = np.random.default_rng(seed)
 
-    for n in names[1:]:
-        if dtypes[n] != dtypes[names[0]]:
-            raise ValueError(
-                f'Arrays {names[0]} and {n} have different dtypes: '
-                f'{dtypes[names[0]]} and {dtypes[n]}'
-            )
+    # allow lengths from 50% to 150% of N_d
+    min_len = max(1, int(N_d * 0.5))
+    max_len = int(N_d * 1.5)
+
+    t_list = []
+    y_list = []
+    dy_list = []
+
+    N_batch = N_batch if N_batch else 1
+
+    for _ in range(N_series):
+        # random series length
+        N_d_i = rng.integers(min_len, max_len + 1)
+        t_i = np.sort(rng.random(N_d_i, dtype=dtype)) * 123
+
+        if N_batch:
+            freqs = rng.random((N_batch, 1), dtype=dtype) * 10 + 1
+            # broadcast over time: (N_batch, N_d_i)
+            y_i = np.sin(freqs * t_i) + 1.23
+            dy_i = rng.random((N_batch, N_d_i), dtype=dtype) * 0.1 + 0.01
+            noise = rng.normal(0, dy_i, size=(N_batch, N_d_i))
+            y_i = y_i + noise
+
+        # make read-only
+        t_i.setflags(write=False)
+        y_i.setflags(write=False)
+        dy_i.setflags(write=False)
+        
+        t_list.append(t_i)
+        y_list.append(y_i)
+        dy_list.append(dy_i)
+
+    fmin_lst, df_lst, Nf_lst = validate_frequency_grid_mp(
+        fmin=None, fmax=None, Nf=None, t_list=t_list)
+
+    fmax_lst = [fmin_lst[i] + df_lst[i] * (Nf_lst[i] - 1) for i in range(len(fmin_lst))]
+
+    return dict(t=t_list, y=y_list, dy=dy_list, fmin=fmin_lst, fmax=fmax_lst, df=df_lst, Nf=Nf_lst)

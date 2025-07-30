@@ -7,7 +7,7 @@ from timeit import default_timer as timer
 import finufft
 import numpy as np
 
-from . import cpu_helpers
+from . import utils_helpers, cpu_helpers
 from .utils import same_dtype_or_raise
 
 FFTW_MEASURE = 0
@@ -256,10 +256,10 @@ def lombscargle(
     t_helpers -= timer()
     if not _no_cpp_helpers:
         norm_enum = dict(
-            standard=cpu_helpers.NormKind.Standard,
-            model=cpu_helpers.NormKind.Model,
-            log=cpu_helpers.NormKind.Log,
-            psd=cpu_helpers.NormKind.PSD,
+            standard=utils_helpers.NormKind.Standard,
+            model=utils_helpers.NormKind.Model,
+            log=utils_helpers.NormKind.Log,
+            psd=utils_helpers.NormKind.PSD,
         )[normalization.lower()]
 
         power = np.empty(f1.shape, dtype=dtype)
