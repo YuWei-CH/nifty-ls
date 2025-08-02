@@ -58,6 +58,8 @@ $ pip install nifty-ls[cuda]
 The default is to install with CUDA 12 support; one can use `nifty-ls[cuda11]` instead for CUDA 11 support (installs `cupy-cuda11x`).
 
 ### From source
+The main requirement for a source build is a C++17 compiler.
+
 First, clone the repo and `cd` to the repo root:
 ```console
 $ git clone https://www.github.com/flatironinstitute/nifty-ls
@@ -76,7 +78,8 @@ To install with GPU (CUDA) support:
 $ pip install .[cuda]
 ```
 
-or `.[cuda11]` for CUDA 11.
+or `.[cuda11]` for CUDA 11. CUDA support is provided by cupy and cufinufft; nifty-ls does not have
+its own CUDA requirements.
 
 For development (with automatic rebuilds enabled by default in `pyproject.toml`):
 ```console
@@ -287,8 +290,73 @@ Note that this computes multiple periodograms simultaneously on a set of time
 series with the same observation times.  This approach is particularly efficient
 for short time series, and/or when using the GPU.
 
-Support for batching multiple time series with distinct observation times is
-not currently implemented, but is planned.
+Batching multiple time series with distinct observation times is not directly supported
+currently, but a similar effect can be achieved with [free-threaded Python](#free-threaded-parallelism).
+
+### Free-Threaded Parallelism
+nifty-ls supports [free-threaded Python](https://docs.python.org/3/howto/free-threading-python.html)
+since version 1.1.0. With a free-threaded build of Python, efficient parallelism over many time
+series with distinct observation times can be achieved with Python threads. For example:
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+
+with ThreadPoolExecutor(max_workers=nthreads) as executor:
+    futures = [
+        executor.submit(nifty_ls.lombscargle, t, y, nthreads=1) for (t,y) in zip(t_values, y_values)
+    ]
+results = [future.result() for future in futures]
+```
+
+<details>
+<summary>Full example</summary>
+
+```python
+import concurrent.futures
+
+import matplotlib.pyplot as plt
+import nifty_ls
+import numpy as np
+
+N_periodograms = 200
+N_points_poisson = 10000
+python_threads = 32  # "None" will use all CPUs
+rng = np.random.default_rng(42)
+
+t_values = []
+y_values = []
+frequencies = rng.uniform(0.1, 100.0, size=N_periodograms)
+
+for i in range(N_periodograms):
+    n_points = rng.poisson(N_points_poisson)
+    t = np.sort(rng.uniform(0, 100, size=n_points))
+    y = np.sin(2 * np.pi * frequencies[i] * t) + 0.1 * rng.normal(size=n_points)
+    t_values.append(t)
+    y_values.append(y)
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=python_threads) as executor:
+    futures = [
+        executor.submit(nifty_ls.lombscargle, t, y, nthreads=1) for (t,y) in zip(t_values, y_values)
+    ]
+
+results = [future.result() for future in futures]
+
+fig, axes = plt.subplots(N_periodograms, 1, figsize=(6, 2 * N_periodograms), constrained_layout=True)
+for i in range(N_periodograms):
+    axes[i].plot(results[i].freq(), results[i].power)
+    axes[i].set_title(f"Periodogram {i + 1}")
+    axes[i].set_xlabel("Frequency")
+    axes[i].set_ylabel("Power")
+
+plt.show()
+```
+</details>
+
+This approach allows you to compute multiple heterogeneous periodograms in parallel. A similar effect can be achieved with multiple processes, but this is less efficient due to the overhead of inter-process communication.
+
+Astropy (as of version 7.1.0) does not support free-threaded Python, however. Be alert for messages printed to the interpreter that free threading is disabled due to Astropy, and remove Astropy from your environment if necessary.
+
+Note that each nifty-ls computation may use multiple OpenMP threads internally. To avoid spawning too many threads, we recommend setting `nthreads=1` in the call to nifty-ls.
 
 
 ### Limitations
@@ -301,7 +369,7 @@ but please open a GitHub issue if this is of interest to you.
 
 Using 16 cores of an Intel Icelake CPU and a NVIDIA A100 GPU, we obtain the following performance. First, we'll look at results from a single periodogram (i.e. unbatched):
 
-![benchmarks](bench.png)
+![benchmarks](doc/bench.png)
 
 In this case, finufft is 5× faster (11× with threads) than Astropy for large transforms, and 2× faster for (very) small transforms.  Small transforms improve futher relative to Astropy with more frequency bins. (Dynamic multi-threaded dispatch of transforms is planned as a future feature which will especially benefit small $N$.)
 
@@ -309,13 +377,13 @@ cufinufft is 200× faster than Astropy for large $N$! The performance plateaus t
 
 Similar performance trends are observed for the $\chi^2$ method. The following results use `nterms=4` as an example:
 
-![benchmarks](bench_chi2.png)
+![benchmarks](doc/bench_chi2.png)
 
 In this case, finufft is 100× faster than Astropy's `fastchi2` method, and 300× faster with multi-threading enabled. cufinufft achieves an impressive 5600× speedup over Astropy for large $N$! However, it suffers from similar overhead for small $N$ due to data transfer costs between CPU and GPU. The performance gain being larger for the $\chi^2$ method than the standard method is partially due to the greater number of NUFFTs in this method, and partially due to the large number of small matrix operations, which nifty-ls accelerates.
 
 The following demonstrates "batch mode", in which 10 periodograms are computed from 10 different time series with the same observation times:
 
-![batched benchmarks](bench_batch.png)
+![batched benchmarks](doc/bench_batch.png)
 
 Here, the finufft single-threaded advantage is consistently 6× across problem sizes, while the multi-threaded advantage is up to 30× for large transforms.
 
@@ -327,7 +395,7 @@ We see that both multi-threaded finufft and cufinufft particularly benefit from 
 
 In contrast, the following shows "batch mode" performance for the chi-squared method under the same setting and `nterms=4`:
 
-![batched benchmarks](bench_chi2_batch.png)
+![batched benchmarks](doc/bench_chi2_batch.png)
 
 Compared to the standard finufft method, the chi-squared method shows less single-thread performance gain when scaling from a single batch to multiple batches. This is because its primary bottlenecks lie in data processing tasks like matrix construction and solving linear systems, rather than the NUFFT transform itself. 
 
@@ -353,7 +421,7 @@ In the figure below, we plot the median periodogram error in circles and the 99t
 
 The astropy result is presented for two cases: a nominal case and a "worst case". Internally, astropy uses an FFT grid whose size is the next power of 2 above the target oversampling rate. Each jump to a new power of 2 typically yields an increase in accuracy. The "worst case", therefore, is the highest frequency that does not yield such a jump.
 
-![](accuracy.png)
+![](doc/accuracy.png)
 
 Errors of $\mathcal{O}(10\%)$ or greater are common with worst-case evaluations. Errors of $\mathcal{O}(1\%)$ or greater are common in typical evaluations. nifty-ls is conservatively 6 orders of magnitude more accurate.
 
@@ -361,7 +429,7 @@ The reference result in the above figure comes from the "phase winding" method, 
 
 The following shows a similar accuracy comparison for the $\chi^2$ variants, finding similar results:
 
-![](accuracy_chi2.png)
+![](doc/accuracy_chi2.png)
 
 In summary, nifty-ls is highly accurate while also giving high performance.
 
@@ -463,7 +531,9 @@ depend on the Numpy distribution you have installed and its trig function perfor
 nifty-ls was originally implemented by [Lehman Garrison](https://github.com/lgarrison)
 based on work done by [Dan Foreman-Mackey](https://github.com/dfm) in the
 [dfm/nufft-ls](https://github.com/dfm/nufft-ls) repo, with consulting from
-[Alex Barnett](https://github.com/ahbarnett).
+[Alex Barnett](https://github.com/ahbarnett). [Yuwei (Peter) Sun](https://github.com/YuWei-CH)
+added the chi2 functionality.
+
 
 ## Citation
 If you use nifty-ls in an academic work, please cite our RNAAS research note:

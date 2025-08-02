@@ -56,6 +56,7 @@ docstring-code-format = true
 [tool.cibuildwheel]
 archs = "auto64"
 build-frontend = "build[uv]"
+enable = "cpython-freethreading"
 test-command = "pytest -s --benchmark-skip {project}/tests"
 test-groups = "test"
 skip = "pp* *-musllinux_*"
@@ -80,6 +81,9 @@ dev = [
 ]
 test = [
     "astropy>=6",
+    {include-group = "test-freethreaded"},
+]
+test-freethreaded = [
     "pytest>=8.4.1",
     "pytest-benchmark>=5.1.0",
 ]
