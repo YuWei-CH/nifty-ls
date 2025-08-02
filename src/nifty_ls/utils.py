@@ -72,21 +72,21 @@ def validate_frequency_grid_mp(
     fmax_vals = _broadcast(fmax, "fmax", float)
     Nf_vals   = _broadcast(Nf,   "Nf",   int)
 
-    fmin_lst = []
-    df_lst = []
-    Nf_lst = []
+    fmin_list = []
+    df_list = []
+    Nf_list = []
 
-    baseline_lst = []
+    baseline_list = []
     for ti in t_list:
         if ti.size < 2:
             raise ValueError("Each time array must have at least two points.")
         b = (ti[-1] - ti[0]) if assume_sorted_t else np.ptp(ti)
         if b <= 0:
             raise ValueError("Time array must be non-degenerate and sorted if assume_sorted_t=True.")
-        baseline_lst.append(float(b))
+        baseline_list.append(float(b))
     
     for i, ti in enumerate(t_list):
-        baseline = baseline_lst[i]
+        baseline = baseline_list[i]
         target_df = 1.0 / (samples_per_peak * baseline)
 
         if fmax_vals[i] is None:
@@ -115,17 +115,18 @@ def validate_frequency_grid_mp(
         if df_i <= 0:
             raise ValueError(f"Computed df({df_i}) must be positive at index {i}.")
         
-        fmin_lst.append(fmin_i)
-        df_lst.append(df_i)
-        Nf_lst.append(Nf_i)
+        fmin_list.append(fmin_i)
+        df_list.append(df_i)
+        Nf_list.append(Nf_i)
 
-    return fmin_lst, df_lst, Nf_lst
+    return fmin_list, df_list, Nf_list
 
 def same_dtype_or_raise(**arrays):
     """
     Check if all arrays have the same dtype, raise ValueError if not.
     """
-    dtypes = {n: a.dtype for (n, a) in arrays.items() if a is not None}
+    dtypes = {n: a.dtype for (n, a) in arrays.items() if a is not None 
+              and not np.isscalar(a)}
     names = list(dtypes.keys())
 
     for n in names[1:]:

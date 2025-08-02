@@ -64,12 +64,12 @@ def gen_data_mp(N_series=100_000, N_batch=None, N_d=100, dtype=np.float64, seed=
         y_list.append(y_i)
         dy_list.append(dy_i)
 
-    fmin_lst, df_lst, Nf_lst = validate_frequency_grid_mp(
+    fmin_list, df_list, Nf_list = validate_frequency_grid_mp(
         fmin=None, fmax=None, Nf=None, t_list=t_list)
 
-    fmax_lst = [fmin_lst[i] + df_lst[i] * (Nf_lst[i] - 1) for i in range(len(fmin_lst))]
+    fmax_list = [fmin_list[i] + df_list[i] * (Nf_list[i] - 1) for i in range(len(fmin_list))]
 
-    return dict(t=t_list, y=y_list, dy=dy_list, fmin=fmin_lst, fmax=fmax_lst, df=df_lst, Nf=Nf_lst)
+    return dict(t=t_list, y=y_list, dy=dy_list, fmin=fmin_list, fmax=fmax_list, df=df_list, Nf=Nf_list)
 
 
 def astropy_ls(

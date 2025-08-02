@@ -68,14 +68,16 @@ void process_finufft_inputs_raw(
     size_t Nshift = Nf / 2;
 
 #ifdef _OPENMP
-    if (nthreads < 1) { nthreads = omp_get_max_threads(); }
-    if (nthreads > omp_get_max_threads()) {
-        fprintf(
-           stderr,
-           "[nifty-ls finufft] Warning: nthreads (%d) > omp_get_max_threads() (%d). Performance may be suboptimal.\n",
-           nthreads,
-           omp_get_max_threads()
-        );
+    if (nthreads != 1) {
+        if (nthreads < 1) { nthreads = omp_get_max_threads(); }
+        if (nthreads > omp_get_max_threads()) {
+            fprintf(
+               stderr,
+               "[nifty-ls finufft_heterobatch] Warning: nthreads (%d) > omp_get_max_threads() (%d). Performance may be suboptimal.\n",
+               nthreads,
+               omp_get_max_threads()
+            );
+        }
     }
 #else
     (void) nthreads;  // suppress unused variable warning
@@ -88,7 +90,7 @@ void process_finufft_inputs_raw(
     if (!broadcast_dy) {
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) num_threads(nthreads) collapse(2) \
-   reduction(vsum : wsum) reduction(vsum : yoff)
+   reduction(vsum : wsum) reduction(vsum : yoff) if (nthreads > 1)
 #endif
         // w2 = dy**-2.
         for (size_t i = 0; i < Nbatch; ++i) {
@@ -103,7 +105,7 @@ void process_finufft_inputs_raw(
     } else {
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) num_threads(nthreads) collapse(2) \
-   reduction(vsum : yoff)
+   reduction(vsum : yoff) if (nthreads > 1)
 #endif
         for (size_t i = 0; i < Nbatch; ++i) {
             for (size_t j = 0; j < N; ++j) {
@@ -124,7 +126,8 @@ void process_finufft_inputs_raw(
         if (center_data || fit_mean) { yoff[i] /= wsum[i]; }
         Scalar normi = norm[i];
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) num_threads(nthreads) reduction(+ : normi)
+#pragma omp parallel for schedule(static) num_threads(nthreads) \
+   reduction(+ : normi) if (nthreads > 1)
 #endif
         for (size_t j = 0; j < N; ++j) {
             w2[i * N + j].real(w2[i * N + j].real() / wsum[i]);  // w2 /= sum
@@ -141,7 +144,7 @@ void process_finufft_inputs_raw(
     const Scalar TWO_PI = 2 * static_cast<Scalar>(PI);
 
 #ifdef _OPENMP
-#pragma omp parallel for num_threads(nthreads) schedule(static)
+#pragma omp parallel for num_threads(nthreads) schedule(static) if (nthreads > 1)
 #endif
     for (size_t j = 0; j < N; ++j) {
         t1[j] = TWO_PI * df * t[j];
@@ -179,7 +182,8 @@ void process_finufft_outputs_raw(
 #endif
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) num_threads(nthreads) collapse(2)
+#pragma omp parallel for schedule(static) num_threads(nthreads) \
+   collapse(2) if (nthreads > 1)
 #endif
     for (size_t i = 0; i < Nbatch; ++i) {
         for (size_t j = 0; j < N; ++j) {
